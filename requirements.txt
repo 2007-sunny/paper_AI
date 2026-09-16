@@ -1,0 +1,6 @@
+ollama
+spacy
+markdown
+fastapi
+pydantic
+uvicorn
