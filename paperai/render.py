@@ -105,8 +105,25 @@ def _render_lang(block: dict, lang: str, highlight) -> str:
     return "".join(f"<p>{_sentence_spans(block, u, lang, highlight)}</p>" for u in block["units"])
 
 
+def _render_pending_lang(block: dict) -> str:
+    """尚未翻譯的區塊：英文不切句直接渲染（避免開啟大型文件時跑 spaCy）。"""
+    kind, items = block["type"], block["items"]
+    if kind == "heading":
+        level = min(block.get("level", 1) + 1, 6)
+        return f"<h{level}>{render_inline(items[0])}</h{level}>"
+    if kind == "list":
+        tag = "ol" if block.get("ordered") else "ul"
+        return f"<{tag}>" + "".join(f"<li>{render_inline(t)}</li>" for t in items) + f"</{tag}>"
+    return "".join(f"<p>{render_inline(t)}</p>" for t in items)
+
+
 def render_block(block: dict, glossary: dict) -> str:
     kind, bid = block["type"], block["id"]
+    if "items" in block:
+        return (f'<section class="block pair block-{kind} pending" id="{bid}">'
+                f'<div class="lang en" lang="en">{_render_pending_lang(block)}</div>'
+                f'<div class="lang zh" lang="zh-Hant"><p class="pending-note">等待翻譯…</p></div>'
+                f"</section>")
     if "units" in block:
         terms = block.get("terms", [])
         classes = f"block pair block-{kind}" + ("" if block.get("aligned", True) else " unaligned")
@@ -133,14 +150,8 @@ def render_block(block: dict, glossary: dict) -> str:
     return f'<section class="block full block-{kind}" id="{bid}">{body}</section>'
 
 
-def render_reader(knowledge: dict, output_path, model_name: str, base_name: str) -> None:
-    glossary_list = knowledge.get("glossary", [])
-    glossary = {g["term"].lower(): g for g in glossary_list}
-    paper_map = knowledge.get("paper_map", {})
-    meta = knowledge.get("metadata", {})
-
-    content = "\n".join(render_block(b, glossary) for b in knowledge.get("blocks", []))
-    glossary_rows = "\n".join(
+def render_glossary_rows(glossary_list: list) -> str:
+    return "\n".join(
         f'<tr><td><strong>{_esc(g["term"])}</strong></td><td>{_esc(g["translation"])}</td>'
         f'<td><span class="badge">{_esc(g.get("category", "general"))}</span></td>'
         f'<td>{"使用者" if g.get("source") == "user" else "自動"}</td>'
@@ -149,15 +160,38 @@ def render_reader(knowledge: dict, output_path, model_name: str, base_name: str)
         f"加入生字本</button></td></tr>"
         for g in glossary_list
     )
+
+
+def status_text(meta: dict) -> str:
     stats = meta.get("stats", {})
-    status = f'{stats.get("translated_blocks", 0)} 個區塊'
+    done, total = stats.get("translated_blocks", 0), stats.get("translatable_blocks", 0)
+    status = f"{done} / {total} 個區塊已翻譯" if total and done < total else f"{done} 個區塊"
     if stats.get("unaligned_blocks"):
         status += f'，{stats["unaligned_blocks"]} 個未逐句對齊'
     if meta.get("preview"):
         status += "（預覽：僅部分內容）"
+    return status
 
-    page_config = {"baseName": base_name, "defaultModel": model_name,
-                   "apiUrl": "http://127.0.0.1:8000/api/explain"}
+
+def render_reader(knowledge: dict, output_path, model_name: str, base_name: str) -> None:
+    """輸出可直接雙擊開啟的靜態閱讀器。"""
+    Path(output_path).write_text(render_reader_html(knowledge, model_name, base_name), encoding="utf-8")
+
+
+def render_reader_html(knowledge: dict, model_name: str, base_name: str, server_mode: bool = False) -> str:
+    """server_mode=True 時由本機服務提供：生字本存 SQLite、翻譯結果即時推送、可修正術語。"""
+    glossary_list = knowledge.get("glossary", [])
+    glossary = {g["term"].lower(): g for g in glossary_list}
+    paper_map = knowledge.get("paper_map", {})
+    meta = knowledge.get("metadata", {})
+
+    content = "\n".join(render_block(b, glossary) for b in knowledge.get("blocks", []))
+    glossary_rows = render_glossary_rows(glossary_list)
+    status = status_text(meta)
+
+    page_config = {"baseName": base_name, "defaultModel": model_name, "serverMode": server_mode,
+                   # 靜態檔以 file:// 開啟時需要完整網址；由服務提供時用相對路徑
+                   "apiBase": "" if server_mode else "http://127.0.0.1:8000"}
     replacements = {
         "__TITLE__": _esc(meta.get("title") or base_name),
         "__DOMAIN__": _esc(paper_map.get("domain", "")),
@@ -175,5 +209,4 @@ def render_reader(knowledge: dict, output_path, model_name: str, base_name: str)
     }
     page = (TEMPLATE_DIR / "reader.html").read_text(encoding="utf-8")
     # 依序以單次掃描取代，避免內容中剛好出現 __XXX__ 字樣被二次取代
-    page = re.sub("|".join(map(re.escape, replacements)), lambda m: replacements[m.group(0)], page)
-    Path(output_path).write_text(page, encoding="utf-8")
+    return re.sub("|".join(map(re.escape, replacements)), lambda m: replacements[m.group(0)], page)

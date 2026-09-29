@@ -2,9 +2,26 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "paperai-server",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "server.py",
+        "--no-browser"
+      ],
+      "port": 8000
+    },
+    {
       "name": "output-static",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "output"],
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8765",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "output"
+      ],
       "port": 8765
     }
   ]

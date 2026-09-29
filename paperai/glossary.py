@@ -115,6 +115,29 @@ def load_user_glossary() -> list:
     return (data or {}).get("glossary", [])
 
 
+def upsert_user_term(term: str, translation: str, old_translation: str = "", category: str = "general") -> dict:
+    """在使用者術語表新增或修改術語；舊譯名自動加入 aliases，已翻譯的舊譯文也會被改正。"""
+    term, translation = term.strip(), translation.strip()
+    if not term or not translation:
+        raise ValueError("術語與譯名不可空白")
+    data = _load_json(config.USER_GLOSSARY_PATH, "glossary.json") or {"glossary": []}
+    entries = data.setdefault("glossary", [])
+    entry = next((g for g in entries if g["term"].lower() == term.lower()), None)
+    if entry is None:
+        entry = {"term": term, "translation": translation, "category": category or "general", "aliases": []}
+        entries.append(entry)
+    previous = entry.get("translation", "")
+    entry["translation"] = translation
+    aliases = entry.setdefault("aliases", [])
+    for old in (old_translation, previous):
+        old = (old or "").strip()
+        if old and old != translation and old not in aliases:
+            aliases.append(old)
+    entry["aliases"] = [a for a in aliases if a != translation]
+    save_json_atomic(config.USER_GLOSSARY_PATH, data)
+    return entry
+
+
 def term_pattern(term: str) -> re.Pattern:
     """英文術語比對：不分大小寫，允許複數詞尾，連字號與空白視為相同。"""
     words = re.split(r"[-\s]+", term.strip())

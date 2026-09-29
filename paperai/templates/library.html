@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PaperAI 書庫</title>
+<style>
+:root {
+    --bg: #f8fafc; --card: #ffffff; --border: #e2e8f0; --text: #1e293b; --muted: #64748b;
+    --accent: #3b82f6; --accent-hover: #1d4ed8; --ok: #16a34a; --warn: #d97706; --danger: #dc2626;
+}
+@media (prefers-color-scheme: dark) {
+    :root { --bg: #0b0f19; --card: #161b26; --border: #2a3345; --text: #f1f5f9; --muted: #a3b1c6;
+            --accent: #60a5fa; --accent-hover: #3b82f6; --ok: #4ade80; --warn: #fbbf24; --danger: #f87171; }
+}
+* { box-sizing: border-box; }
+body { margin: 0 auto; max-width: 1100px; padding: 2rem 1rem; background: var(--bg); color: var(--text);
+       font-family: 'Noto Sans TC', 'Microsoft JhengHei', 'PingFang TC', system-ui, sans-serif; line-height: 1.6; }
+h1 { font-size: 1.6rem; margin: 0 0 0.25rem; }
+h2 { font-size: 1.15rem; margin: 0 0 0.75rem; }
+.sub { color: var(--muted); font-size: 0.9rem; margin: 0 0 1.5rem; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem; }
+.doc { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 0.75rem 0; border-top: 1px solid var(--border); }
+.doc:first-of-type { border-top: 0; }
+.doc a.title { color: var(--text); font-weight: 700; text-decoration: none; }
+.doc a.title:hover { color: var(--accent); }
+.meta { color: var(--muted); font-size: 0.8rem; word-break: break-all; }
+.bar { width: 140px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--accent); }
+.progress { display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem; font-size: 0.8rem; color: var(--muted); flex-shrink: 0; }
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+td, th { padding: 0.45rem 0.5rem; border-top: 1px solid var(--border); text-align: left; vertical-align: middle; }
+th { color: var(--muted); font-weight: 600; border-top: 0; }
+input[type=text] { padding: 0.45rem 0.6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 0.9rem; }
+button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 0.45rem 0.9rem; font: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
+button:hover { background: var(--accent-hover); }
+button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+.row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+.row input.grow { flex: 1; min-width: 220px; }
+.pages { width: 90px; }
+.tag { font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 4px; border: 1px solid var(--border); color: var(--muted); }
+.tag.ok { color: var(--ok); border-color: var(--ok); }
+.tag.warn { color: var(--warn); border-color: var(--warn); }
+.tag.err { color: var(--danger); border-color: var(--danger); }
+.empty { color: var(--muted); font-size: 0.9rem; }
+.hint { color: var(--muted); font-size: 0.8rem; margin-top: 0.5rem; }
+.scroll { max-height: 420px; overflow-y: auto; }
+.error { color: var(--danger); font-size: 0.85rem; min-height: 1.2em; }
+@media (max-width: 640px) {
+    .doc { flex-direction: column; align-items: flex-start; }
+    .progress { align-items: flex-start; }
+    .hide-sm { display: none; }
+}
+</style>
+</head>
+<body>
+<h1>PaperAI 書庫</h1>
+<p class="sub" id="subtitle">本機翻譯模型：…</p>
+
+<section class="card">
+    <h2>我的文件</h2>
+    <div id="docs"><p class="empty">載入中…</p></div>
+</section>
+
+<section class="card" id="jobs-card" hidden>
+    <h2>轉檔工作</h2>
+    <table><thead><tr><th>時間</th><th>檔案</th><th>狀態</th><th>訊息</th></tr></thead><tbody id="jobs"></tbody></table>
+</section>
+
+<section class="card">
+    <h2>新增 PDF</h2>
+    <div class="row">
+        <input type="text" class="grow" id="pdf-path" placeholder="PDF 完整路徑，例如 D:\papers\xxx.pdf（可在檔案總管按右鍵「複製路徑」）">
+        <input type="text" class="pages" id="pdf-pages" placeholder="頁碼（選填）">
+        <button id="convert-btn">轉換</button>
+    </div>
+    <p class="hint">PDF 不會被複製，只轉換成 Markdown 存在 output/。頁碼從 0 起算，例如 0-40；大型書籍建議分章轉換，每一章會成為一份獨立文件。</p>
+    <p class="error" id="convert-error"></p>
+</section>
+
+<section class="card">
+    <h2>監看資料夾</h2>
+    <div class="row">
+        <input type="text" class="grow" id="folder-path" placeholder="放 PDF 的資料夾，例如 D:\papers">
+        <button id="folder-btn">加入</button>
+    </div>
+    <p class="error" id="folder-error"></p>
+    <div id="folders"></div>
+    <div class="scroll"><table><tbody id="pdfs"></tbody></table></div>
+</section>
+
+<script>
+(() => {
+    const $ = (id) => document.getElementById(id);
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+
+    async function api(path, body) {
+        const res = await fetch(path, body === undefined ? {} : {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        return data;
+    }
+
+    function renderDocs(docs) {
+        if (!docs.length) {
+            $('docs').innerHTML = '<p class="empty">還沒有文件。從下方加入 PDF 開始。</p>';
+            return;
+        }
+        $('docs').innerHTML = docs.map((d) => {
+            const pct = d.total ? Math.round(d.translated / d.total * 100) : 0;
+            const label = !d.total ? '尚未翻譯' : d.translated >= d.total ? '已完成' : `${d.translated} / ${d.total}`;
+            const source = d.pdf_path ? `${esc(d.pdf_path)}${d.pages ? `（頁 ${esc(d.pages)}）` : ''}` : esc(d.name);
+            return `<div class="doc">
+                <div><a class="title" href="/read/${encodeURIComponent(d.name)}/">${esc(d.title)}</a>
+                <div class="meta">${d.domain ? esc(d.domain) + ' · ' : ''}${source}</div></div>
+                <div class="progress"><div class="bar"><span style="width:${pct}%"></span></div>${label}</div>
+            </div>`;
+        }).join('');
+    }
+
+    function renderJobs(jobs) {
+        $('jobs-card').hidden = !jobs.length;
+        $('jobs').innerHTML = jobs.map((j) => {
+            const cls = j.status === '完成' ? 'ok' : j.status === '失敗' ? 'err' : 'warn';
+            const name = j.pdf.split(/[\\/]/).pop();
+            const link = j.doc ? ` <a href="/read/${encodeURIComponent(j.doc)}/">開啟</a>` : '';
+            return `<tr><td>${esc(j.time)}</td><td>${esc(name)}${j.pages ? `（頁 ${esc(j.pages)}）` : ''}</td>
+                <td><span class="tag ${cls}">${esc(j.status)}</span></td><td class="meta">${esc(j.message)}${link}</td></tr>`;
+        }).join('');
+    }
+
+    function renderFolders(folders, pdfs) {
+        $('folders').innerHTML = folders.map((f) => `<div class="row" style="margin-bottom:0.4rem">
+            <span class="meta" style="flex:1">${esc(f)}</span>
+            <button class="ghost" data-remove-folder="${esc(f)}">移除</button></div>`).join('');
+        if (!folders.length) {
+            $('pdfs').innerHTML = '<tr><td class="empty">加入資料夾後，會列出裡面所有的 PDF（含子資料夾）。</td></tr>';
+            return;
+        }
+        $('pdfs').innerHTML = pdfs.length ? pdfs.map((p) => `<tr>
+            <td>${esc(p.name)}<div class="meta hide-sm">${esc(p.path)}</div></td>
+            <td class="meta">${p.size_mb} MB</td>
+            <td>${p.converted ? '<span class="tag ok">已轉換</span>' : ''}</td>
+            <td><div class="row" style="justify-content:flex-end">
+                <input type="text" class="pages" placeholder="頁碼" data-pages-for="${esc(p.path)}">
+                <button data-convert="${esc(p.path)}">轉換</button></div></td>
+        </tr>`).join('') : '<tr><td class="empty">這些資料夾裡沒有 PDF。</td></tr>';
+    }
+
+    let polling = null;
+    async function refresh() {
+        try {
+            const state = await api('/api/library');
+            $('subtitle').textContent = `本機翻譯模型：${state.model}　·　開啟文件後會從你閱讀的位置開始翻譯`;
+            renderDocs(state.docs);
+            renderJobs(state.jobs);
+            renderFolders(state.folders, state.pdfs);
+            const busy = state.jobs.some((j) => j.status === '排隊中' || j.status === '轉換中');
+            clearTimeout(polling);
+            polling = setTimeout(refresh, busy ? 3000 : 15000);
+        } catch (e) {
+            $('docs').innerHTML = `<p class="error">無法載入書庫：${esc(e.message)}</p>`;
+        }
+    }
+
+    async function convert(path, pages) {
+        $('convert-error').textContent = '';
+        try {
+            await api('/api/convert', {path, pages});
+            refresh();
+        } catch (e) {
+            $('convert-error').textContent = e.message;
+        }
+    }
+
+    $('convert-btn').addEventListener('click', () => convert($('pdf-path').value, $('pdf-pages').value));
+    $('folder-btn').addEventListener('click', async () => {
+        $('folder-error').textContent = '';
+        try {
+            await api('/api/folders', {path: $('folder-path').value.trim().replace(/^"|"$/g, '')});
+            $('folder-path').value = '';
+            refresh();
+        } catch (e) {
+            $('folder-error').textContent = e.message;
+        }
+    });
+    document.addEventListener('click', async (e) => {
+        const conv = e.target.closest('[data-convert]');
+        if (conv) {
+            const pages = document.querySelector(`[data-pages-for="${CSS.escape(conv.dataset.convert)}"]`)?.value || '';
+            convert(conv.dataset.convert, pages);
+        }
+        const rm = e.target.closest('[data-remove-folder]');
+        if (rm) {
+            await api('/api/folders/remove', {path: rm.dataset.removeFolder});
+            refresh();
+        }
+    });
+    refresh();
+})();
+</script>
+</body>
+</html>

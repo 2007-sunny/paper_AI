@@ -14,7 +14,32 @@ from .llm import chat, safe_json_parse, save_json_atomic
 from .sentences import split_en_sentences
 
 # 修改提示詞或輸出格式時遞增，讓舊快取自動失效
-PROMPT_VERSION = 2
+# 3：修正 LaTeX 反斜線被 JSON 解析成控制字元（\bar、\text、\frac…）
+PROMPT_VERSION = 3
+
+_BACKSLASH_RUN = re.compile(r"(\\+)(?=[A-Za-z]{2})")
+_UNICODE_ESCAPE = re.compile(r"u[0-9a-fA-F]{4}")
+# JSON 合法跳脫 \b \f \t \r 被解析後的控制字元 → 還原成 LaTeX 反斜線
+_CONTROL_TO_LATEX = {"\b": "\\b", "\f": "\\f", "\t": "\\t", "\r": "\\r"}
+
+
+def _escape_latex_in_json(raw: str) -> str:
+    """模型常在 JSON 字串中寫單一反斜線的 LaTeX（如 \\bar），補成 \\\\bar 再解析。
+
+    奇數個反斜線後接兩個以上字母視為未跳脫的 LaTeX 指令；\\uXXXX 例外。
+    """
+    def fix(m):
+        run = m.group(1)
+        if len(run) % 2 == 0 or _UNICODE_ESCAPE.match(raw, m.end()):
+            return run
+        return run + "\\"
+    return _BACKSLASH_RUN.sub(fix, raw)
+
+
+def _repair_control_chars(text: str) -> str:
+    for ch, latex in _CONTROL_TO_LATEX.items():
+        text = text.replace(ch, latex)
+    return text
 
 
 @dataclass
@@ -83,7 +108,7 @@ def translate_sentences(sentences: list, paper_map: dict, terms: list, model: st
                    temperature=0.2 if attempt else None)
         tokens += res.tokens
         seconds += res.eval_seconds
-        zh = safe_json_parse(res.content, {}).get("translations")
+        zh = safe_json_parse(_escape_latex_in_json(res.content), {}).get("translations")
         if isinstance(zh, list) and len(zh) == len(sentences) and all(isinstance(z, str) for z in zh):
             zh = [_NUMBER_PREFIX_RE.sub("", z).strip() for z in zh]
             return TranslationResult(zh, True, tokens, seconds)
@@ -91,7 +116,7 @@ def translate_sentences(sentences: list, paper_map: dict, terms: list, model: st
     # 對齊失敗：整段翻譯，保證至少有譯文
     whole = [" ".join(sentences)]
     res = chat(build_translation_prompt(whole, paper_map, terms), model, fmt=_schema(1), num_predict=budget)
-    zh = safe_json_parse(res.content, {}).get("translations") or [res.content]
+    zh = safe_json_parse(_escape_latex_in_json(res.content), {}).get("translations") or [res.content]
     zh = _NUMBER_PREFIX_RE.sub("", str(zh[0])).strip()
     return TranslationResult([zh], False, tokens + res.tokens, seconds + res.eval_seconds)
 
@@ -122,6 +147,11 @@ class TranslationCache:
         save_json_atomic(self.path, self.data)
 
 
+def source_hash(items: list) -> str:
+    """區塊原文的 hash；重新開啟文件時用來判斷既有譯文是否仍對應同一段原文。"""
+    return hashlib.md5("\n".join(items).encode("utf-8")).hexdigest()[:12]
+
+
 def translate_block(block: dict, paper_map: dict, glossary: list, cache: TranslationCache,
                     model: str = None) -> bool:
     """翻譯 heading/paragraph/list 區塊，將 items 轉為 units（每個 unit 是一串中英句對）。
@@ -130,6 +160,7 @@ def translate_block(block: dict, paper_map: dict, glossary: list, cache: Transla
     """
     model = model or config.MODEL_NAME
     items = block.pop("items")
+    block["src"] = source_hash(items)
     unit_sentences = [split_en_sentences(text) or [text] for text in items]
     flat = [s for unit in unit_sentences for s in unit]
     terms = find_matching_terms(" ".join(items), glossary)
@@ -149,13 +180,13 @@ def translate_block(block: dict, paper_map: dict, glossary: list, cache: Transla
             pairs = []
             for en in unit:
                 sid += 1
-                pairs.append({"id": f"s{sid}", "en": en, "zh": apply_aliases(en, cached["zh"][pos], terms)})
+                pairs.append({"id": f"s{sid}", "en": en, "zh": apply_aliases(en, _repair_control_chars(cached["zh"][pos]), terms)})
                 pos += 1
             units.append(pairs)
     else:
         # 整段譯文無法拆回各項目，合併成單一句對
         en = " ".join(flat)
-        units = [[{"id": "s1", "en": en, "zh": apply_aliases(en, cached["zh"][0], terms)}]]
+        units = [[{"id": "s1", "en": en, "zh": apply_aliases(en, _repair_control_chars(cached["zh"][0]), terms)}]]
 
     block["units"] = units
     block["aligned"] = cached["aligned"]

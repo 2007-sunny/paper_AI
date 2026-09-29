@@ -1,6 +1,23 @@
 # PaperAI 維護索引
 
-translate.py 是命令列入口，流程程式在 paperai/，閱讀器模板在 paperai/templates/。
+入口：server.py（本機服務）、translate.py（命令列翻譯）、pdftomd.py（命令列轉檔）。流程程式在 paperai/，網頁模板在 paperai/templates/。
+
+## 本機服務
+
+| 功能 | 位置 |
+|---|---|
+| 路由與 Origin 檢查 | `app.py`（`reject_cross_site_writes`） |
+| 書庫清單、監看資料夾、生字本（SQLite） | `library.py`，資料庫 `output/library.db` |
+| PDF 轉檔（含頁碼範圍命名） | `convert.convert_pdf` |
+| 背景排程優先順序 | `session.Worker._next` |
+| 閱讀位置優先 | `DocSession.set_focus`、`_pick` |
+| 翻譯一個區塊並推送 | `DocSession._translate` |
+| 術語修改後重翻 | `glossary.upsert_user_term` → `Worker.glossary_changed` → `DocSession.on_glossary_changed` |
+| 背景翻譯時間、存檔頻率 | `session.BACKGROUND_WINDOW`、`SAVE_INTERVAL` |
+| 書庫頁 | `templates/library.html`（內含 JS） |
+| 閱讀頁即時更新 | `templates/reader.js` 的 `if (serverMode)` 區段 |
+
+SSE 事件（`/api/docs/<名稱>/events`）：`block`（id、html）、`progress`（done、total、pending）、`status`（text）、`meta`（標題、摘要、術語表列）、`stale`（ids）。
 
 ## 流程與對應模組
 
@@ -47,6 +64,8 @@ translate.py 是命令列入口，流程程式在 paperai/，閱讀器模板在 
 
 `units` 是二維陣列：段落與標題只有一個 unit，清單每個項目是一個 unit。句子 id 在區塊內唯一，閱讀器以 `data-block` + `data-sid` 配對中英句子。
 
-## 即時單字解釋後端
+已翻譯區塊另有 `src`（原文 hash），重新開啟文件時用來判斷譯文是否仍對應原文（`pipeline.restore_translations`）。未翻譯的區塊保留 `items`。
 
-server.py 提供 /api/explain，預設模型取自 paperai/config.py。執行方式見 README.md。
+## 選字查詢
+
+`/api/explain` 在 `app.py`，預設模型取自 paperai/config.py。以 file:// 開啟的靜態閱讀器也能呼叫（CORS 只對此路徑允許 Origin: null）。

@@ -1,19 +1,19 @@
 """使用 Marker 將 PDF 轉成 output/<名稱>/<名稱>.md。
 
-PDF 可放在任何位置；只給檔名時會到 input/ 尋找。
+PDF 可放在任何位置；只給檔名時會到 input/ 尋找。指定 --pages 時，文件名稱會加上 _p<範圍>。
 範例：
 python pdftomd.py "D:/papers/1804.03318v2.pdf"
 python pdftomd.py "Fundamentals of Photonics.pdf" --pages 0-40
 """
 import argparse
-import os
-import subprocess
 import sys
 from pathlib import Path
 
+from paperai import config
+from paperai.convert import convert_pdf
+
 sys.stdout.reconfigure(encoding="utf-8")
 
-PROJECT_ROOT = Path(__file__).resolve().parent
 INPUT_FILENAME = "1804.03318v2.pdf"
 
 
@@ -25,19 +25,9 @@ def main():
 
     pdf_path = Path(args.pdf)
     if not pdf_path.is_file():
-        pdf_path = PROJECT_ROOT / "input" / args.pdf
-    if not pdf_path.is_file():
-        raise FileNotFoundError(f"找不到 PDF：{args.pdf}")
-
-    output_dir = PROJECT_ROOT / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    command = ["marker_single", str(pdf_path.resolve()), "--output_dir", str(output_dir)]
-    if args.pages:
-        command.extend(["--page_range", args.pages])
-    print(f"正在轉換：{pdf_path}")
-    # 自動選擇裝置；可透過 TORCH_DEVICE 環境變數指定。
-    subprocess.run(command, env=os.environ.copy(), check=True)
-    print(f"完成！接著執行：python translate.py --input \"{pdf_path.stem}.md\"")
+        pdf_path = config.PROJECT_ROOT / "input" / args.pdf
+    name = convert_pdf(pdf_path, args.pages)
+    print(f"接著執行：python translate.py --input \"{name}.md\"，或用 python server.py 在書庫中開啟")
 
 
 if __name__ == "__main__":

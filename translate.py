@@ -12,12 +12,11 @@ python translate.py --input "1804.03318v2.md" --limit 20
 import argparse
 import sys
 import time
-from datetime import datetime
 
 from paperai import config
 from paperai.blocks import TRANSLATABLE_TYPES, parse_blocks
-from paperai.glossary import build_glossary, generate_glossary, get_paper_map, load_user_glossary
 from paperai.llm import save_json_atomic
+from paperai.pipeline import build_knowledge, prepare
 from paperai.render import render_reader
 from paperai.translator import TranslationCache, translate_block
 
@@ -69,9 +68,7 @@ def main():
     print(f"=== PaperAI：{doc.base_name}（模型：{config.MODEL_NAME}） ===")
     markdown_text = doc.load_markdown()
 
-    paper_map = get_paper_map(markdown_text, doc.path("_paper_map.json"))
-    auto_terms = generate_glossary(paper_map, markdown_text, doc.path("_glossary.json"))
-    glossary = build_glossary(auto_terms, load_user_glossary(), markdown_text)
+    paper_map, glossary = prepare(doc, markdown_text)
     print(f"[術語] 共 {len(glossary)} 個（使用者 {sum(g['source'] == 'user' for g in glossary)} 個）")
 
     blocks = parse_blocks(markdown_text)
@@ -96,21 +93,8 @@ def main():
                   f"預估剩餘 {format_duration(eta)}{flag}")
     print(f"[翻譯] 完成：呼叫模型 {model_calls} 次，其餘 {len(todo) - model_calls} 個命中快取")
 
-    unaligned = sum(1 for b in todo if not b["aligned"])
-    knowledge = {
-        "version": 2,
-        "metadata": {
-            "title": paper_map.get("title", doc.base_name),
-            "author": paper_map.get("author", "Unknown"),
-            "model": config.MODEL_NAME,
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "preview": args.limit > 0,
-            "stats": {"blocks": len(blocks), "translated_blocks": len(todo), "unaligned_blocks": unaligned},
-        },
-        "paper_map": paper_map,
-        "glossary": glossary,
-        "blocks": blocks,
-    }
+    knowledge = build_knowledge(doc, paper_map, glossary, blocks, preview=args.limit > 0)
+    unaligned = knowledge["metadata"]["stats"]["unaligned_blocks"]
     save_json_atomic(knowledge_path, knowledge)
     render_reader(knowledge, reader_path, config.MODEL_NAME, doc.base_name)
 

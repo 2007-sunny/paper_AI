@@ -22,14 +22,14 @@ __CSS__
 </head>
 <body data-view="parallel">
     <header class="header">
-        <h1 class="header-title">__TITLE__</h1>
+        <h1 class="header-title" id="meta-title">__TITLE__</h1>
         <div class="header-meta">
-            <div class="meta-item"><span class="meta-label">領域</span>__DOMAIN__</div>
-            <div class="meta-item"><span class="meta-label">主題</span>__TOPICS__</div>
+            <div class="meta-item"><span class="meta-label">領域</span><span id="meta-domain">__DOMAIN__</span></div>
+            <div class="meta-item"><span class="meta-label">主題</span><span id="meta-topics">__TOPICS__</span></div>
             <div class="meta-item"><span class="meta-label">作者</span>__AUTHOR__</div>
-            <div class="meta-item"><span class="meta-label">翻譯</span>__MODEL__ · __STATUS__</div>
+            <div class="meta-item"><span class="meta-label">翻譯</span>__MODEL__ · <span id="meta-status">__STATUS__</span></div>
         </div>
-        <p class="header-summary">__SUMMARY__</p>
+        <p class="header-summary" id="meta-summary">__SUMMARY__</p>
     </header>
 
     <nav class="control-panel">
@@ -40,6 +40,9 @@ __CSS__
             <button class="tab-btn" data-view-btn="chinese">只看中文</button>
         </div>
         <div class="toolbar-actions">
+            <span class="live-status" id="live-status" hidden></span>
+            <a class="tool-btn server-only" href="/" hidden>書庫</a>
+            <button class="tool-btn" data-open-drawer="toc">目錄</button>
             <button class="tool-btn" data-open-drawer="vocab">生字本</button>
             <button class="tool-btn" data-open-drawer="help">說明</button>
             <button class="tool-btn" id="theme-toggle">切換深淺色</button>
@@ -55,12 +58,13 @@ __CONTENT__
         <div class="table-wrap">
             <table class="glossary-table">
                 <thead><tr><th>術語</th><th>標準譯名</th><th>類別</th><th>來源</th><th></th></tr></thead>
-                <tbody>
+                <tbody id="glossary-rows">
 __GLOSSARY_ROWS__
                 </tbody>
             </table>
         </div>
-        <p class="hint">譯名有誤時，將正確譯名加入專案根目錄的 glossary.json，再重跑 translate.py；只有含該術語的區塊會重新翻譯。</p>
+        <p class="hint static-only">譯名有誤時，將正確譯名加入專案根目錄的 glossary.json，再重跑 translate.py；只有含該術語的區塊會重新翻譯。</p>
+        <p class="hint server-only" hidden>點擊內文中的術語即可修正譯名；含該術語的段落會自動重新翻譯。</p>
     </section>
 
     <div class="drawer-backdrop" id="drawer-backdrop"></div>
@@ -68,6 +72,10 @@ __GLOSSARY_ROWS__
         <div class="drawer-header">
             <h2 class="widget-title">閱讀工具</h2>
             <button class="drawer-close" id="drawer-close" aria-label="關閉">&times;</button>
+        </div>
+        <div class="widget" id="toc-panel">
+            <h3 class="widget-title">目錄</h3>
+            <nav id="toc" class="toc"></nav>
         </div>
         <div class="widget" id="vocab-panel">
             <h3 class="widget-title">生字本</h3>
@@ -88,9 +96,10 @@ __GLOSSARY_ROWS__
             <h3 class="widget-title">使用說明</h3>
             <ul class="help-list">
                 <li>滑鼠移到句子上，會同時標示對應的另一種語言句子。</li>
-                <li>點擊藍色虛線術語，可加入生字本。</li>
+                <li>點擊藍色虛線術語，可加入生字本；由 python server.py 開啟時還能修正譯名。</li>
                 <li>選取或雙擊任意英文單字，點浮動按鈕即可請本機 AI 解釋並加入生字本。</li>
                 <li>灰色虛框的段落表示模型未能逐句對齊，顯示整段譯文。</li>
+                <li>由 python server.py 開啟時，會從你正在閱讀的位置開始翻譯，譯文完成後自動出現。</li>
             </ul>
         </div>
     </aside>
@@ -110,6 +119,25 @@ __GLOSSARY_ROWS__
             <div class="modal-footer">
                 <span>AI 模型：<span id="modal-model"></span></span>
                 <button class="action-btn-sm" id="modal-close">關閉</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="term-modal" aria-hidden="true">
+        <div class="modal">
+            <h3 class="modal-title" id="term-title"></h3>
+            <p><strong>目前譯名：</strong><span id="term-current" class="modal-translation"></span></p>
+            <div class="server-only term-edit" hidden>
+                <label for="term-input"><strong>修正為：</strong></label>
+                <input type="text" id="term-input" autocomplete="off">
+                <p class="hint">儲存到使用者術語表（glossary.json），所有文件共用；含這個術語的段落會重新翻譯。</p>
+            </div>
+            <div class="modal-footer">
+                <button class="action-btn-sm" id="term-add-vocab">加入生字本</button>
+                <span>
+                    <button class="action-btn-sm server-only" id="term-save" hidden>儲存譯名</button>
+                    <button class="action-btn-sm" id="term-close">關閉</button>
+                </span>
             </div>
         </div>
     </div>
