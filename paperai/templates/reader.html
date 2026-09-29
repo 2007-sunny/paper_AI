@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>__TITLE__</title>
+    <script>
+        window.MathJax = {
+            tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true },
+            options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+        };
+        window.PAPERAI = __CONFIG__;
+        try {
+            const savedTheme = localStorage.getItem('paperai_theme');
+            if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
+        } catch (e) {}
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+    <style>
+__CSS__
+    </style>
+</head>
+<body data-view="parallel">
+    <header class="header">
+        <h1 class="header-title">__TITLE__</h1>
+        <div class="header-meta">
+            <div class="meta-item"><span class="meta-label">領域</span>__DOMAIN__</div>
+            <div class="meta-item"><span class="meta-label">主題</span>__TOPICS__</div>
+            <div class="meta-item"><span class="meta-label">作者</span>__AUTHOR__</div>
+            <div class="meta-item"><span class="meta-label">翻譯</span>__MODEL__ · __STATUS__</div>
+        </div>
+        <p class="header-summary">__SUMMARY__</p>
+    </header>
+
+    <nav class="control-panel">
+        <div class="tab-group" role="tablist">
+            <button class="tab-btn active" data-view-btn="parallel">左右對照</button>
+            <button class="tab-btn" data-view-btn="interleaved">上下交錯</button>
+            <button class="tab-btn" data-view-btn="english">只看英文</button>
+            <button class="tab-btn" data-view-btn="chinese">只看中文</button>
+        </div>
+        <div class="toolbar-actions">
+            <button class="tool-btn" data-open-drawer="vocab">生字本</button>
+            <button class="tool-btn" data-open-drawer="help">說明</button>
+            <button class="tool-btn" id="theme-toggle">切換深淺色</button>
+        </div>
+    </nav>
+
+    <main class="reader-content">
+__CONTENT__
+    </main>
+
+    <section class="widget glossary-widget">
+        <h2 class="widget-title">術語表</h2>
+        <div class="table-wrap">
+            <table class="glossary-table">
+                <thead><tr><th>術語</th><th>標準譯名</th><th>類別</th><th>來源</th><th></th></tr></thead>
+                <tbody>
+__GLOSSARY_ROWS__
+                </tbody>
+            </table>
+        </div>
+        <p class="hint">譯名有誤時，將正確譯名加入專案根目錄的 glossary.json，再重跑 translate.py；只有含該術語的區塊會重新翻譯。</p>
+    </section>
+
+    <div class="drawer-backdrop" id="drawer-backdrop"></div>
+    <aside class="side-drawer" id="side-drawer" aria-hidden="true">
+        <div class="drawer-header">
+            <h2 class="widget-title">閱讀工具</h2>
+            <button class="drawer-close" id="drawer-close" aria-label="關閉">&times;</button>
+        </div>
+        <div class="widget" id="vocab-panel">
+            <h3 class="widget-title">生字本</h3>
+            <div class="vocab-list" id="vocab-list"></div>
+            <button class="action-btn" id="download-vocab">下載 vocab.json</button>
+        </div>
+        <div class="widget" id="model-panel">
+            <h3 class="widget-title">查詢用模型</h3>
+            <select id="ai-model-select"></select>
+            <p class="hint">選字查詢需先啟動 server.py：uvicorn server:app --host 127.0.0.1 --port 8000</p>
+        </div>
+        <div class="widget" id="ai-history-panel">
+            <h3 class="widget-title">AI 查詢紀錄</h3>
+            <div id="ai-history" class="history-list"></div>
+            <button class="action-btn danger" id="clear-history">清除全部紀錄</button>
+        </div>
+        <div class="widget" id="help-panel">
+            <h3 class="widget-title">使用說明</h3>
+            <ul class="help-list">
+                <li>滑鼠移到句子上，會同時標示對應的另一種語言句子。</li>
+                <li>點擊藍色虛線術語，可加入生字本。</li>
+                <li>選取或雙擊任意英文單字，點浮動按鈕即可請本機 AI 解釋並加入生字本。</li>
+                <li>灰色虛框的段落表示模型未能逐句對齊，顯示整段譯文。</li>
+            </ul>
+        </div>
+    </aside>
+
+    <div class="notification" id="notif-bar"></div>
+    <button class="selection-popup" id="selection-popup" type="button">查詢並加入生字本</button>
+
+    <div class="modal-backdrop" id="ai-modal" aria-hidden="true">
+        <div class="modal">
+            <h3 id="modal-title" class="modal-title"></h3>
+            <p><strong>繁體翻譯：</strong><span id="modal-translation" class="modal-translation"></span></p>
+            <p><strong>專業領域：</strong><span id="modal-category" class="badge"></span></p>
+            <p><strong>詳細解釋：</strong></p>
+            <div id="modal-explanation" class="modal-explanation"></div>
+            <p><strong>學術示範例句：</strong></p>
+            <ul id="modal-sentences" class="modal-sentences"></ul>
+            <div class="modal-footer">
+                <span>AI 模型：<span id="modal-model"></span></span>
+                <button class="action-btn-sm" id="modal-close">關閉</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+__JS__
+    </script>
+</body>
+</html>

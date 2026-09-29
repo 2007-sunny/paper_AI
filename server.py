@@ -4,6 +4,8 @@ from pydantic import BaseModel
 import ollama
 import json
 
+from paperai.config import MODEL_NAME
+
 # =====使用方法=====#
 """
 開啟終端機執行：
@@ -20,9 +22,8 @@ app.add_middleware(
 )
 
 # 可用模型列表
-# 名稱需與 `ollama list` 一致
-downloaded_models = ["gemma4:latest", "qwythos:latest"]
-model_name = downloaded_models[0]
+# 預設與 translate.py 相同（paperai/config.py），前端可另外指定
+model_name = MODEL_NAME
 print(f"目前選擇使用的模型：{model_name}")
 
 class ExplainRequest(BaseModel):

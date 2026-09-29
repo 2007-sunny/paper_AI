@@ -1,6 +1,6 @@
 ollama
 spacy
-markdown
+markdown-it-py
 fastapi
 pydantic
 uvicorn

@@ -1,0 +1,15 @@
+{
+  "_說明": "跨文件共用的術語表，同名時優先於自動生成的術語表。term 用英文單數原形（比對時不分大小寫、允許複數）；aliases 列出要自動改正的錯譯或中國大陸用語。修改後重跑 translate.py，只有含該術語的區塊會重新翻譯。",
+  "glossary": [
+    {"term": "stopping power", "translation": "阻擋本領", "category": "physics", "aliases": ["阻能功率", "停損量度", "止滯力", "停止能量", "減速能力", "阻止能力"]},
+    {"term": "fluence", "translation": "通量", "category": "physics", "aliases": ["束流濫", "流濫", "注量"]},
+    {"term": "plasma", "translation": "電漿", "category": "physics", "aliases": ["等離子體", "等離子"]},
+    {"term": "scintillator", "translation": "閃爍體", "category": "instrument", "aliases": ["閃光螢光材料", "閃光劑", "閃爍劑"]},
+    {"term": "straggling", "translation": "歧離", "category": "physics", "aliases": ["擴散效應"]},
+    {"term": "signal-to-noise ratio", "translation": "訊雜比", "category": "general", "aliases": ["信噪比", "訊噪比", "信雜比"]},
+    {"term": "laser", "translation": "雷射", "category": "physics", "aliases": ["激光"]},
+    {"term": "detector", "translation": "偵測器", "category": "instrument", "aliases": ["探測器"]},
+    {"term": "Monte Carlo", "translation": "蒙地卡羅", "category": "math", "aliases": ["蒙特卡羅", "蒙特卡洛"]},
+    {"term": "resolution", "translation": "解析度", "category": "general", "aliases": ["分辨率", "分辯率"]}
+  ]
+}
