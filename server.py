@@ -20,7 +20,8 @@ app.add_middleware(
 )
 
 # 可用模型列表
-downloaded_models = ["ollama/qwythos:latest"]
+# 名稱需與 `ollama list` 一致
+downloaded_models = ["gemma4:latest", "qwythos:latest"]
 model_name = downloaded_models[0]
 print(f"目前選擇使用的模型：{model_name}")
 
@@ -64,6 +65,7 @@ def explain_word(payload: ExplainRequest):
                 {'role': 'user', 'content': user_content}
             ],
             format='json',
+            think=False,  # 思考型模型關閉 thinking，查詢才會即時回應
             options={'temperature': 0.3}
         )
 

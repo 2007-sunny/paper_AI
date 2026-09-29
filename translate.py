@@ -21,20 +21,41 @@ import ollama
 import spacy
 import markdown
 import time
+import argparse
+import hashlib
 
 
 # Force UTF-8 stdout for Windows consoles
 sys.stdout.reconfigure(encoding='utf-8')
 
 # ============== Configuration ==============
-MODEL_NAME = "ollama/qwythos:latest"
+# 以下為預設值，可用命令列參數覆寫（python translate.py --help）。
+MODEL_NAME = "gemma4:latest"  # 需與 `ollama list` 顯示的名稱一致
 INPUT_FILENAME = "Fundamentals of Photonics-Wiley-Blackwell (2019).md"
-BASE_NAME = INPUT_FILENAME.replace(".md", "")
-OUTPUT_DIR = os.path.join(os.path.join(os.path.dirname(os.path.abspath(__file__)), "output"), BASE_NAME)
+# 思考型模型（如 qwythos）的 thinking 會大幅拖慢翻譯，預設關閉。
+THINK = False
+NUM_CTX = 16384      # 需容納術語擷取的 25000 字元採樣
+NUM_PREDICT = 4096   # 單次回覆上限，避免失控生成
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-MD_PATH = os.path.join(OUTPUT_DIR, INPUT_FILENAME)
-FALLBACK_MD_PATH = INPUT_FILENAME
+
+def configure(input_filename: str = None, model_name: str = None, think: bool = None):
+    """依設定計算輸出路徑；main() 與 tools/ 腳本皆透過此函式設定。"""
+    global INPUT_FILENAME, MODEL_NAME, THINK, BASE_NAME, OUTPUT_DIR, MD_PATH, FALLBACK_MD_PATH
+    if input_filename:
+        INPUT_FILENAME = input_filename
+    if model_name:
+        MODEL_NAME = model_name
+    if think is not None:
+        THINK = think
+    BASE_NAME = INPUT_FILENAME.replace(".md", "")
+    OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output", BASE_NAME)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    MD_PATH = os.path.join(OUTPUT_DIR, INPUT_FILENAME)
+    FALLBACK_MD_PATH = INPUT_FILENAME
+
+
+configure()
 
 # Load spaCy English model
 print("Loading spaCy English model...")
@@ -77,12 +98,25 @@ def load_markdown(path: str, fallback_path: str) -> str:
     else:
         raise FileNotFoundError(f"Could not locate Markdown file at {path} or {fallback_path}")
 
-def call_ai(prompt: str, model_name: str = MODEL_NAME) -> str:
+def call_ai(prompt: str, model_name: str = None) -> str:
     """Wrapper for Ollama chat."""
-    response = ollama.chat(model=model_name, messages=[
-        {'role': 'user', 'content': prompt}
-    ])
-    return response['message']['content']
+    response = ollama.chat(
+        model=model_name or MODEL_NAME,
+        messages=[{'role': 'user', 'content': prompt}],
+        think=THINK,
+        options={'num_ctx': NUM_CTX, 'num_predict': NUM_PREDICT},
+    )
+    content = response['message']['content']
+    # 部分模型即使關閉 thinking 仍可能在內文輸出 <think> 區塊
+    return re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
+
+
+def save_json_atomic(path: str, data) -> None:
+    """先寫入暫存檔再取代，避免中斷時留下損毀的 JSON。"""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
 
 def safe_json_parse(raw_text: str, fallback: dict) -> dict:
     """Safely extracts and parses JSON from raw LLM output."""
@@ -175,8 +209,16 @@ JSON："""
 
 # ============== Pass 1: Terminology Agent ==============
 
-def run_terminology_agent(paper_map: dict, full_text: str) -> dict:
+def run_terminology_agent(paper_map: dict, full_text: str, output_path: str = None) -> dict:
     """Extracts a unified glossary of key scientific terms for the entire paper."""
+    # 術語表每次重新生成會導致譯名不一致，存在時直接沿用；刪除檔案即可重新生成。
+    if output_path and os.path.exists(output_path):
+        print("[Pass 1] Reusing existing glossary from disk...")
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"    [WARNING] Error reading glossary: {e}. Re-generating...")
     print("[Pass 1] Terminology Agent generating glossary...")
     preview = _sample_text(full_text, max_chars=25000)
 
@@ -225,13 +267,16 @@ JSON："""
     }
     glossary = safe_json_parse(raw_output, fallback)
     print(f"    Glossary generated with {len(glossary.get('glossary', []))} terms.")
+    if output_path and glossary is not fallback:
+        save_json_atomic(output_path, glossary)
+        print(f"    Saved glossary to {output_path}")
     return glossary
 
 
 # ============== Pass 2: Paragraph Translator ==============
 
-def translate_paragraph(paragraph: str, paper_map: dict, glossary: dict) -> str:
-    """Translates a single paragraph using the context and glossary."""
+def build_translation_prompt(paragraph: str, paper_map: dict, glossary: dict) -> str:
+    """組裝段落翻譯提示詞；tools/bench_models.py 共用此函式。"""
     glossary_list = "\n".join(
         f"- {g['term']} -> {g['translation']} ({g.get('category', 'general')})"
         for g in glossary.get("glossary", [])
@@ -264,7 +309,12 @@ def translate_paragraph(paragraph: str, paper_map: dict, glossary: dict) -> str:
 
 【繁體中文翻譯】
 """
-    return call_ai(prompt).strip()
+    return prompt
+
+
+def translate_paragraph(paragraph: str, paper_map: dict, glossary: dict) -> str:
+    """Translates a single paragraph using the context and glossary."""
+    return call_ai(build_translation_prompt(paragraph, paper_map, glossary)).strip()
 
 
 # ============== Pass Post-Processor: Glossary Consistency Correction ==============
@@ -1314,7 +1364,7 @@ def render_html_reader(knowledge_data: dict, output_html_path: str):
             <div class="widget" id="model-panel" style="margin-top: 15px;">
                 <h3 class="widget-title">AI Model Selector</h3>
                 <select id="ai-model-select" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border-color, #ccc); background: var(--card-bg, #fff); color: var(--text-color, #333); font-size: 14px; cursor: pointer;">
-                    <option value="ollama/qwythos:latest" selected>Qwythos (Default)</option>
+                    <option value="{html_attr(MODEL_NAME)}" selected>{html_text(MODEL_NAME)} (Default)</option>
                 </select>
             </div>
 
@@ -1750,7 +1800,19 @@ def render_html_reader(knowledge_data: dict, output_html_path: str):
 
 # ============== Pipeline Execution ==============
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="PaperAI：Markdown → 雙語閱讀器")
+    parser.add_argument("--input", help=f"output/<名稱>/ 下的 .md 檔名（預設：{INPUT_FILENAME}）")
+    parser.add_argument("--model", help=f"Ollama 模型名稱（預設：{MODEL_NAME}）")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="只處理前 N 段，輸出 *_preview_reader.html，用於快速檢查")
+    parser.add_argument("--think", action="store_true", help="啟用模型 thinking（較慢）")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    configure(args.input, args.model, True if args.think else None)
     print("=== PaperAI Translation Pipeline v1 ===")
 
     # Load Markdown input
@@ -1762,11 +1824,17 @@ def main():
     paper_map = get_paper_map(full_markdown, paper_map_path)
 
     # Pass 1: Terminology Agent
-    glossary = run_terminology_agent(paper_map, full_markdown)
+    glossary_path = os.path.join(OUTPUT_DIR, f"{BASE_NAME}_glossary.json")
+    glossary = run_terminology_agent(paper_map, full_markdown, glossary_path)
 
     # Split Markdown into paragraphs
     raw_paragraphs = split_paragraphs(full_markdown)
     print(f"Total paragraphs detected: {len(raw_paragraphs)}")
+    output_suffix = ""
+    if args.limit > 0:
+        raw_paragraphs = raw_paragraphs[:args.limit]
+        output_suffix = "_preview"
+        print(f"Preview mode: only processing first {len(raw_paragraphs)} paragraphs.")
 
     # Pass 2 & 3 & 4: Paragraph Translation, Sentence Splitting, Terms Mapping
     processed_paragraphs = []
@@ -1804,7 +1872,6 @@ def main():
         en_sentences = split_en_sentences(raw_p)
 
         # 檢查快取
-        import hashlib
         p_hash = hashlib.md5(raw_p.encode('utf-8')).hexdigest()
 
         if p_hash in translation_cache:
@@ -1819,7 +1886,11 @@ def main():
 
             # 儲存快取
             translation_cache[p_hash] = corrected_p
-            # (此處省略寫入快取檔案的 try-except...)
+            # 每段完成即寫入，中斷後重跑可從這裡接續
+            try:
+                save_json_atomic(cache_path, translation_cache)
+            except Exception as e:
+                print(f"    [WARNING] Failed to write translation cache: {e}")
 
         # 🌟 【新架構核心 2】智慧型中文斷句與強迫對齊
         # 不要再用正則去盲猜翻譯後的中文怎麼斷句了！
@@ -1872,13 +1943,13 @@ def main():
     }
 
     # Save Knowledge File
-    knowledge_path = os.path.join(OUTPUT_DIR, f"{BASE_NAME}_translation_knowledge.json")
+    knowledge_path = os.path.join(OUTPUT_DIR, f"{BASE_NAME}{output_suffix}_translation_knowledge.json")
     with open(knowledge_path, "w", encoding="utf-8") as f:
         json.dump(knowledge_data, f, ensure_ascii=False, indent=2)
     print(f"\n[Pass 4] Created translation knowledge database: {knowledge_path}")
 
     # Save initial vocabulary list
-    vocab_path = os.path.join(OUTPUT_DIR, f"{BASE_NAME}_vocab.json")
+    vocab_path = os.path.join(OUTPUT_DIR, f"{BASE_NAME}{output_suffix}_vocab.json")
     initial_vocab = {
         "unknown_words": [g["term"] for g in glossary.get("glossary", [])]
     }
@@ -1887,7 +1958,7 @@ def main():
     print(f"[Pass 4] Created initial vocab list: {vocab_path}")
 
     # Pass 5: HTML Reader rendering
-    html_reader_path = os.path.join(OUTPUT_DIR, f"{BASE_NAME}_reader.html")
+    html_reader_path = os.path.join(OUTPUT_DIR, f"{BASE_NAME}{output_suffix}_reader.html")
     render_html_reader(knowledge_data, html_reader_path)
 
     print("\n Translation Pipeline Version 1 Finished Successfully!")

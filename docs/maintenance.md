@@ -46,11 +46,13 @@ an initial vocabulary JSON, and an interactive bilingual HTML reader.
 
 ## Translation Logic Maintenance Map
 
-- Change global model: edit `MODEL_NAME`.
-- Change input paper: edit `INPUT_FILENAME`.
+- Change global model: edit `MODEL_NAME` or pass `--model`.
+- Change input paper: edit `INPUT_FILENAME` or pass `--input`.
+- Ollama options (thinking, context, output limit): `THINK`, `NUM_CTX`, `NUM_PREDICT` used by `call_ai`.
+- Output paths: `configure` recomputes `BASE_NAME` / `OUTPUT_DIR`; call it before using them from other scripts.
 - Change paragraph splitting: edit `split_paragraphs`.
 - Change glossary extraction prompt: edit `run_terminology_agent`.
-- Change paragraph translation prompt: edit `translate_paragraph`.
+- Change paragraph translation prompt: edit `build_translation_prompt` (shared with `tools/bench_models.py`).
 - Add deterministic terminology fixes: edit `glossary_consistency_correction`.
 
 ## 即時單字解釋後端
