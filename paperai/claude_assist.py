@@ -1,7 +1,9 @@
 """把困難段落、推導與圖片交給 Claude 解說（選用；大量逐段翻譯仍用本機模型）。
 
-需要 Anthropic API 憑證（環境變數 ANTHROPIC_API_KEY，或 `ant auth login`）。
-每次查詢都會把該段原文（或圖片）傳送到 Anthropic，並依用量計費。
+兩種用法：
+- 預設：build_prompt 組出提示詞，由閱讀器複製到剪貼簿，使用者自行貼到網頁版 AI（不需要 API）。
+- 有 Anthropic API 憑證（環境變數 ANTHROPIC_API_KEY）時，ask 可直接在閱讀器中取得回答；
+  每次查詢會把該段原文（或圖片）傳送到 Anthropic，並依用量計費。
 """
 import base64
 import mimetypes
@@ -27,16 +29,24 @@ class ClaudeUnavailable(Exception):
     pass
 
 
-def ask(mode: str, text: str = "", translation: str = "", question: str = "",
-        image_path: Path = None, context: dict = None) -> dict:
-    """回傳 {"answer": Markdown 文字, "model": 實際回答的模型}。"""
+def api_available() -> bool:
+    """有沒有設定 API 憑證；沒有時閱讀器只提供「複製提示詞」給網頁版 AI。"""
+    import os
     try:
-        import anthropic
+        import anthropic  # noqa: F401
     except ImportError:
-        raise ClaudeUnavailable("尚未安裝 anthropic 套件（python -m pip install anthropic）")
+        return False
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
+
+def build_prompt(mode: str, text: str = "", translation: str = "", question: str = "",
+                 context: dict = None, for_web: bool = False) -> str:
+    """組出提示詞。for_web=True 時把角色說明放在開頭，方便直接貼到 claude.ai 等網頁版 AI。"""
     context = context or {}
-    parts = [MODES.get(mode, MODES["explain"])]
+    parts = [SYSTEM_PROMPT] if for_web else []
+    parts.append(MODES.get(mode, MODES["explain"]))
+    if for_web and mode == "figure":
+        parts.append("（圖片已另外貼上）")
     if context.get("title"):
         parts.append(f"【文件】{context['title']}（{context.get('domain', '')}）")
     if text:
@@ -45,6 +55,18 @@ def ask(mode: str, text: str = "", translation: str = "", question: str = "",
         parts.append(f"【目前的機器翻譯】\n{translation}")
     if question.strip():
         parts.append(f"【讀者的問題】\n{question.strip()}")
+    return "\n\n".join(parts)
+
+
+def ask(mode: str, text: str = "", translation: str = "", question: str = "",
+        image_path: Path = None, context: dict = None) -> dict:
+    """回傳 {"answer": Markdown 文字, "model": 實際回答的模型}。"""
+    try:
+        import anthropic
+    except ImportError:
+        raise ClaudeUnavailable("尚未安裝 anthropic 套件（python -m pip install anthropic）")
+
+    parts = [build_prompt(mode, text, translation, question, context)]
 
     content = []
     if image_path:

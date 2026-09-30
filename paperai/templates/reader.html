@@ -138,20 +138,27 @@ __GLOSSARY_ROWS__
 
     <div class="modal-backdrop" id="ask-modal" aria-hidden="true">
         <div class="modal ask-modal">
-            <h3 class="modal-title">問 Claude</h3>
+            <h3 class="modal-title">問 AI</h3>
             <div class="ask-source" id="ask-source"></div>
+            <p class="hint">1. 選擇要問什麼（可再補充問題）　2. 複製提示詞　3. 貼到 Claude.ai 或其他網頁版 AI。提示詞含原始 LaTeX 原文、目前譯文與文件背景。</p>
             <div class="row-actions">
-                <button class="action-btn-sm" data-ask-mode="explain" id="ask-explain">解說這段（推導、概念）</button>
-                <button class="action-btn-sm" data-ask-mode="translate" id="ask-translate">檢查這段翻譯</button>
-                <button class="action-btn-sm" data-ask-mode="figure" id="ask-figure">解說這張圖</button>
+                <button class="action-btn-sm mode-btn" data-ask-mode="explain" id="ask-explain">解說這段（推導、概念）</button>
+                <button class="action-btn-sm mode-btn" data-ask-mode="translate" id="ask-translate">檢查這段翻譯</button>
+                <button class="action-btn-sm mode-btn" data-ask-mode="figure" id="ask-figure">解說這張圖</button>
             </div>
             <div class="ask-question">
-                <input type="text" id="ask-input" placeholder="或輸入你的問題，例如：第二個等號怎麼來的？" autocomplete="off">
-                <button class="action-btn-sm" id="ask-send">送出</button>
+                <input type="text" id="ask-input" placeholder="補充你的問題（選填），例如：第二個等號怎麼來的？" autocomplete="off">
             </div>
+            <div class="row-actions ask-go">
+                <button class="action-btn-sm primary" id="ask-copy">複製提示詞</button>
+                <button class="action-btn-sm primary" id="ask-copy-image" hidden>複製圖片</button>
+                <a class="action-btn-sm" href="https://claude.ai/new" target="_blank" rel="noopener">開啟 Claude.ai ↗</a>
+                <button class="action-btn-sm" id="ask-api" hidden>直接問 Claude（API）</button>
+            </div>
+            <textarea class="ask-fallback" id="ask-fallback" readonly hidden></textarea>
             <div class="ask-answer" id="ask-answer"></div>
             <div class="modal-footer">
-                <span>會將這段原文（或圖片）傳送到 Anthropic，依用量計費；需要設定 ANTHROPIC_API_KEY。</span>
+                <span id="ask-note">圖片：先按「複製圖片」貼上，再按「複製提示詞」貼上。</span>
                 <button class="action-btn-sm" id="ask-close">關閉</button>
             </div>
         </div>

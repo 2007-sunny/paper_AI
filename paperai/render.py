@@ -197,7 +197,7 @@ def render_reader(knowledge: dict, output_path, model_name: str, base_name: str)
 
 
 def render_reader_html(knowledge: dict, model_name: str, base_name: str, server_mode: bool = False,
-                       pdf: dict = None) -> str:
+                       pdf: dict = None, claude_api: bool = False) -> str:
     """server_mode=True 時由本機服務提供：生字本存 SQLite、翻譯結果即時推送、可修正術語。
 
     pdf={"url", "pages"} 時啟用原版面檢視（只有本機服務能提供原始 PDF）。
@@ -213,7 +213,8 @@ def render_reader_html(knowledge: dict, model_name: str, base_name: str, server_
 
     page_config = {"baseName": base_name, "defaultModel": model_name, "serverMode": server_mode,
                    # 靜態檔以 file:// 開啟時需要完整網址；由服務提供時用相對路徑
-                   "apiBase": "" if server_mode else "http://127.0.0.1:8000", "pdf": pdf}
+                   "apiBase": "" if server_mode else "http://127.0.0.1:8000", "pdf": pdf,
+                   "claudeApi": claude_api}
     replacements = {
         "__TITLE__": _esc(meta.get("title") or base_name),
         "__DOMAIN__": _esc(paper_map.get("domain", "")),

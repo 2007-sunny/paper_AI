@@ -189,6 +189,21 @@ class AskRequest(BaseModel):
     question: str = ""
 
 
+@app.post("/api/docs/{name}/prompt")
+def build_prompt(name: str, req: AskRequest):
+    """組出可貼到網頁版 AI 的提示詞（不呼叫任何 API）；圖片區塊另外回傳圖片檔名供前端複製。"""
+    _doc_dir(name)
+    try:
+        material = worker.session(name).block_material(req.block)
+    except KeyError:
+        raise HTTPException(404, "找不到這個區塊")
+    mode = "figure" if material["type"] == "image" else req.mode
+    text = claude_assist.build_prompt(mode, material["text"] if mode != "figure" else "", material["translation"],
+                                      req.question[:2000], material["context"], for_web=True)
+    image = material["image"].name if material["image"] and mode == "figure" else None
+    return {"text": text, "image": image}
+
+
 @app.post("/api/docs/{name}/ask")
 def ask_claude(name: str, req: AskRequest):
     """把一個區塊（段落、表格或圖片）交給 Claude 解說；會傳送該區塊內容到 Anthropic。"""

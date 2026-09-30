@@ -14,7 +14,7 @@ import traceback
 from collections import deque
 from datetime import datetime
 
-from . import config, library
+from . import claude_assist, config, library
 from .blocks import TRANSLATABLE_TYPES, parse_blocks
 from .convert import convert_pdf
 from .glossary import build_glossary, generate_glossary, load_user_glossary, term_pattern
@@ -72,7 +72,8 @@ class DocSession:
         with self.lock:
             knowledge = build_knowledge(self.doc, self.paper_map or {}, self.glossary, self.blocks)
             pdf = {"url": "source.pdf", "pages": self.pdf_pages} if self.pdf_path else None
-            return render_reader_html(knowledge, config.MODEL_NAME, self.name, server_mode=True, pdf=pdf)
+            return render_reader_html(knowledge, config.MODEL_NAME, self.name, server_mode=True, pdf=pdf,
+                                      claude_api=claude_assist.api_available())
 
     def block_material(self, bid: str) -> dict:
         """問 Claude 用：區塊的原文、目前譯文、圖片路徑與文件資訊。"""

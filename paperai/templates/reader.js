@@ -543,10 +543,12 @@
         })();
         pdfView.start();
 
-        // ---------- 問 Claude：困難段落、翻譯檢查、看圖 ----------
+        // ---------- 問 AI：複製提示詞貼到網頁版 AI；有 API 金鑰時也可直接問 Claude ----------
         var askUI = (() => {
             let blockId = null;
+            let mode = 'explain';
             let busy = false;
+            $('ask-api').hidden = !config.claudeApi;
 
             function decorate(section) {
                 if (!(section.classList.contains('pair') || section.classList.contains('block-image'))) return;
@@ -554,10 +556,17 @@
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'ask-btn';
-                btn.textContent = '問 Claude';
+                btn.textContent = '問 AI';
                 btn.dataset.askBlock = section.id;
                 section.appendChild(btn);
             }
+
+            function setMode(next) {
+                mode = next;
+                document.querySelectorAll('[data-ask-mode]').forEach((b) => b.classList.toggle('active', b.dataset.askMode === mode));
+            }
+
+            function status(html) { $('ask-answer').innerHTML = html; }
 
             function open(id) {
                 const section = $(id);
@@ -566,25 +575,65 @@
                 const isImage = section.classList.contains('block-image');
                 const source = isImage ? section.querySelector('figure') : section.querySelector('.lang.en');
                 $('ask-source').innerHTML = source ? source.innerHTML : '';
-                $('ask-explain').hidden = $('ask-translate').hidden = isImage;
-                $('ask-figure').hidden = !isImage;
+                $('ask-explain').hidden = isImage;
                 $('ask-translate').hidden = isImage || section.classList.contains('pending');
-                $('ask-answer').innerHTML = '';
+                $('ask-figure').hidden = !isImage;
+                $('ask-copy-image').hidden = !isImage;
+                $('ask-note').hidden = !isImage;
+                $('ask-fallback').hidden = true;
                 $('ask-input').value = '';
+                setMode(isImage ? 'figure' : 'explain');
+                status('');
                 $('ask-modal').classList.add('open');
             }
 
-            async function ask(mode) {
+            async function copyPrompt() {
+                if (!blockId) return;
+                try {
+                    const res = await postJson(`${docApi}/prompt`, { block: blockId, mode, question: $('ask-input').value });
+                    try {
+                        await navigator.clipboard.writeText(res.text);
+                        $('ask-fallback').hidden = true;
+                        status('<p class="ok">已複製提示詞，貼到網頁版 AI 即可。</p>');
+                    } catch (e) {
+                        // 剪貼簿權限被拒時，改成顯示文字讓使用者手動複製
+                        $('ask-fallback').value = res.text;
+                        $('ask-fallback').hidden = false;
+                        $('ask-fallback').select();
+                        status('<p class="error">瀏覽器不允許自動複製，請用 Ctrl+C 複製下方文字。</p>');
+                    }
+                } catch (e) {
+                    status(`<p class="error">${escapeHtml(e.message)}</p>`);
+                }
+            }
+
+            async function copyImage() {
+                const img = $(blockId)?.querySelector('img');
+                if (!img) return;
+                try {
+                    // 剪貼簿只接受 PNG，JPEG 圖片先經 canvas 轉換
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.naturalWidth;
+                    canvas.height = img.naturalHeight;
+                    canvas.getContext('2d').drawImage(img, 0, 0);
+                    const png = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+                    await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+                    status('<p class="ok">已複製圖片。貼到網頁版 AI 後，再按「複製提示詞」貼上問題。</p>');
+                } catch (e) {
+                    status('<p class="error">無法複製圖片，請在圖片上按右鍵「複製圖片」。</p>');
+                }
+            }
+
+            async function askApi() {
                 if (busy || !blockId) return;
                 busy = true;
-                const answer = $('ask-answer');
-                answer.innerHTML = '<p class="thinking">Claude 思考中，可能需要數十秒…</p>';
+                status('<p class="thinking">Claude 思考中，可能需要數十秒…</p>');
                 try {
                     const res = await postJson(`${docApi}/ask`, { block: blockId, mode, question: $('ask-input').value });
-                    answer.innerHTML = res.html + `<p class="hint">回答模型：${escapeHtml(res.model)}</p>`;
-                    typeset(answer);
+                    status(res.html + `<p class="hint">回答模型：${escapeHtml(res.model)}</p>`);
+                    typeset($('ask-answer'));
                 } catch (e) {
-                    answer.innerHTML = `<p class="error">${escapeHtml(e.message)}</p>`;
+                    status(`<p class="error">${escapeHtml(e.message)}</p>`);
                 } finally {
                     busy = false;
                 }
@@ -595,9 +644,11 @@
                 if (btn) { e.stopPropagation(); open(btn.dataset.askBlock); }
             });
             document.querySelectorAll('[data-ask-mode]').forEach((b) =>
-                b.addEventListener('click', () => ask(b.dataset.askMode)));
-            $('ask-send').addEventListener('click', () => ask($(blockId)?.classList.contains('block-image') ? 'figure' : 'explain'));
-            $('ask-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('ask-send').click(); });
+                b.addEventListener('click', () => setMode(b.dataset.askMode)));
+            $('ask-copy').addEventListener('click', copyPrompt);
+            $('ask-copy-image').addEventListener('click', copyImage);
+            $('ask-api').addEventListener('click', askApi);
+            $('ask-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') copyPrompt(); });
             $('ask-close').addEventListener('click', () => $('ask-modal').classList.remove('open'));
             $('ask-modal').addEventListener('click', (e) => { if (e.target === $('ask-modal')) $('ask-modal').classList.remove('open'); });
             content.querySelectorAll('section').forEach(decorate);
