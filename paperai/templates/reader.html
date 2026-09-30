@@ -7,7 +7,10 @@
     <script>
         window.MathJax = {
             tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true },
-            options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+            options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] },
+            // 首次排版完成後通知 reader.js 量測過寬的公式
+            startup: { pageReady: () => MathJax.startup.defaultPageReady()
+                .then(() => window.dispatchEvent(new Event('paperai-math-ready'))) }
         };
         window.PAPERAI = __CONFIG__;
         try {

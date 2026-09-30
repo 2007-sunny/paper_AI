@@ -36,9 +36,21 @@
         clearTimeout(showNotification.timer);
         showNotification.timer = setTimeout(() => { bar.style.display = 'none'; }, 2500);
     }
-    function typeset(el) {
-        if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
+    function markWideMath(root) {
+        // 只標記比所在欄還寬的行內公式；全部加捲動條會讓每個公式都出現灰色 bar
+        root.querySelectorAll('.lang mjx-container:not([display="true"])').forEach((m) => {
+            m.classList.remove('math-wide');
+            const lang = m.closest('.lang');
+            if (lang && lang.clientWidth && m.getBoundingClientRect().width > lang.clientWidth) m.classList.add('math-wide');
+        });
     }
+    function typeset(el) {
+        if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).then(() => markWideMath(el)).catch(() => {});
+    }
+    window.addEventListener('paperai-math-ready', () => markWideMath(document));
+    let wideTimer = null;
+    const remeasure = () => { clearTimeout(wideTimer); wideTimer = setTimeout(() => markWideMath(document), 300); };
+    window.addEventListener('resize', remeasure);
 
     // ---------- 檢視模式與主題 ----------
     function switchView(mode) {
@@ -46,6 +58,7 @@
         document.querySelectorAll('.tab-btn').forEach((btn) =>
             btn.classList.toggle('active', btn.dataset.viewBtn === mode));
         save('paperai_view', mode);
+        remeasure();  // 對照與單欄的欄寬不同
     }
     document.querySelectorAll('.tab-btn').forEach((btn) =>
         btn.addEventListener('click', () => switchView(btn.dataset.viewBtn)));
