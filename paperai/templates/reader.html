@@ -41,6 +41,7 @@ __CSS__
             <button class="tab-btn" data-view-btn="interleaved">上下交錯</button>
             <button class="tab-btn" data-view-btn="english">只看英文</button>
             <button class="tab-btn" data-view-btn="chinese">只看中文</button>
+            <button class="tab-btn" data-view-btn="pdf" id="pdf-tab" hidden>原版面</button>
         </div>
         <div class="toolbar-actions">
             <span class="live-status" id="live-status" hidden></span>
@@ -55,6 +56,14 @@ __CSS__
     <main class="reader-content">
 __CONTENT__
     </main>
+
+    <div class="pdf-view" id="pdf-view" hidden>
+        <div class="pdf-pages" id="pdf-pages"><p class="pdf-loading" id="pdf-loading">載入 PDF 中…</p></div>
+        <aside class="pdf-side">
+            <div class="pdf-side-head">第 <span id="pdf-side-page">—</span> 頁的譯文</div>
+            <div class="pdf-side-body" id="pdf-side-body"></div>
+        </aside>
+    </div>
 
     <section class="widget glossary-widget">
         <h2 class="widget-title">術語表</h2>
@@ -84,6 +93,7 @@ __GLOSSARY_ROWS__
             <h3 class="widget-title">生字本</h3>
             <div class="vocab-list" id="vocab-list"></div>
             <button class="action-btn" id="download-vocab">下載 vocab.json</button>
+            <p class="hint server-only" hidden><a href="/review">生字複習</a>　·　<a href="/api/vocab/export.tsv">匯出 Anki</a></p>
         </div>
         <div class="widget" id="model-panel">
             <h3 class="widget-title">查詢用模型</h3>
@@ -122,6 +132,27 @@ __GLOSSARY_ROWS__
             <div class="modal-footer">
                 <span>AI 模型：<span id="modal-model"></span></span>
                 <button class="action-btn-sm" id="modal-close">關閉</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="ask-modal" aria-hidden="true">
+        <div class="modal ask-modal">
+            <h3 class="modal-title">問 Claude</h3>
+            <div class="ask-source" id="ask-source"></div>
+            <div class="row-actions">
+                <button class="action-btn-sm" data-ask-mode="explain" id="ask-explain">解說這段（推導、概念）</button>
+                <button class="action-btn-sm" data-ask-mode="translate" id="ask-translate">檢查這段翻譯</button>
+                <button class="action-btn-sm" data-ask-mode="figure" id="ask-figure">解說這張圖</button>
+            </div>
+            <div class="ask-question">
+                <input type="text" id="ask-input" placeholder="或輸入你的問題，例如：第二個等號怎麼來的？" autocomplete="off">
+                <button class="action-btn-sm" id="ask-send">送出</button>
+            </div>
+            <div class="ask-answer" id="ask-answer"></div>
+            <div class="modal-footer">
+                <span>會將這段原文（或圖片）傳送到 Anthropic，依用量計費；需要設定 ANTHROPIC_API_KEY。</span>
+                <button class="action-btn-sm" id="ask-close">關閉</button>
             </div>
         </div>
     </div>

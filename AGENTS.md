@@ -2,10 +2,10 @@
 
 ## 正式流程
 PDF → Marker → Markdown → 切區塊 → 逐句翻譯 → knowledge JSON → HTML 閱讀器。兩種入口共用 paperai/ 套件：
-- 本機服務 server.py（paperai/app.py + session.py）：書庫、邊讀邊翻、即時推送、術語修正、SQLite 生字本。
+- 本機服務 server.py（paperai/app.py + session.py）：書庫、邊讀邊翻、即時推送、術語修正、SQLite 生字本與複習、原版面檢視、問 Claude。
 - 命令列 translate.py / pdftomd.py：一次處理整份文件，輸出靜態 HTML。
-模組：config（設定與路徑）、llm（Ollama）、convert（Marker）、blocks（切區塊）、sentences（斷句）、glossary（摘要與術語）、translator（翻譯與快取）、pipeline（共用組裝）、render + templates/（HTML）、library（SQLite 書庫）、session（背景排程）、app（FastAPI 路由）。
-所有推論使用本機 Ollama。experiments/ 的分析流程不參與正式閱讀器生成。
+模組：config（設定與路徑）、llm（Ollama）、convert（Marker）、blocks（切區塊）、sentences（斷句）、glossary（摘要與術語）、translator（翻譯與快取）、pipeline（共用組裝）、render + templates/（HTML）、library（SQLite 書庫、生字複習）、session（背景排程）、app（FastAPI 路由）、pages（區塊對應 PDF 頁碼）、claude_assist（問 Claude）。
+翻譯推論一律使用本機 Ollama；只有使用者在閱讀器按「問 Claude」時才呼叫 Anthropic API（claude_assist.py，模型 claude-opus-5-5）。experiments/ 的分析流程不參與正式閱讀器生成。
 
 ## 路徑與設定
 - 生成結果放在 output/{BASE_NAME}/，書庫資料庫為 output/library.db，皆不提交 Git。PDF 可放在任何位置，書庫只記錄路徑。

@@ -1,7 +1,7 @@
 """把 Marker 產生的 Markdown 切成區塊。
 
-只有 heading / paragraph / list 需要翻譯（items 為待翻譯的文字單位）；
-table / math / image / code / html 原樣保留在 source，渲染時整塊輸出。
+heading / paragraph / list / table 需要翻譯（items 為待翻譯的文字單位；表格另保留 source）；
+math / image / code / html 原樣保留在 source，渲染時整塊輸出。
 """
 import re
 
@@ -9,7 +9,8 @@ from markdown_it import MarkdownIt
 
 _md = MarkdownIt("commonmark").enable("table")
 
-TRANSLATABLE_TYPES = {"heading", "paragraph", "list"}
+# table 另外保留 source；翻譯時只翻含英文的儲存格（translator.translate_table）
+TRANSLATABLE_TYPES = {"heading", "paragraph", "list", "table"}
 
 # Marker 在標題與段落前插入的頁面錨點，閱讀器用不到
 _ANCHOR_RE = re.compile(r'<span id="[^"]*"></span>')
@@ -74,7 +75,7 @@ def parse_blocks(markdown_text: str) -> list:
                     block["start"] = int(tok.attrGet("start") or 1)
                 blocks.append(block)
         elif kind == "table_open":
-            blocks.append({"type": "table", "source": src})
+            blocks.append({"type": "table", "source": src, "items": [src]})
         elif kind in ("fence", "code_block"):
             blocks.append({"type": "code", "source": tok.content})
         elif kind == "html_block":

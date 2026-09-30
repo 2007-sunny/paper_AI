@@ -31,6 +31,12 @@ def _connect():
             doc TEXT, context TEXT, added_at TEXT);
         CREATE UNIQUE INDEX IF NOT EXISTS vocab_term ON vocab (lower(term));
     """)
+    # 複習欄位是後來加的，舊資料庫需要補欄位
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(vocab)")}
+    for column, ddl in (("box", "INTEGER DEFAULT 0"), ("due", "TEXT"), ("reviews", "INTEGER DEFAULT 0"),
+                        ("lapses", "INTEGER DEFAULT 0")):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE vocab ADD COLUMN {column} {ddl}")
     return conn
 
 
@@ -72,6 +78,15 @@ def record_source(name: str, pdf_path: str, pages: str = None) -> None:
 def _sources() -> dict:
     with _lock, _connect() as conn:
         return {r["name"]: dict(r) for r in conn.execute("SELECT * FROM sources")}
+
+
+def source_pdf(name: str):
+    """文件的原始 PDF 路徑；沒有紀錄時嘗試 input/<名稱>.pdf（早期放在 input/ 的文件）。"""
+    source = _sources().get(name)
+    if source and Path(source["pdf_path"]).is_file():
+        return Path(source["pdf_path"])
+    fallback = config.PROJECT_ROOT / "input" / f"{name}.pdf"
+    return fallback if fallback.is_file() else None
 
 
 # ---------- 文件與 PDF 清單 ----------
@@ -156,3 +171,50 @@ def add_vocab(term: str, translation: str, category: str, doc: str = "", context
 def delete_vocab(vocab_id: int) -> None:
     with _lock, _connect() as conn:
         conn.execute("DELETE FROM vocab WHERE id = ?", (vocab_id,))
+
+
+# ---------- 複習（Leitner 盒子：記得就升一盒、間隔加倍；忘記回到第 0 盒） ----------
+
+REVIEW_INTERVAL_DAYS = [0, 1, 2, 4, 8, 16, 32, 64]
+
+
+def due_vocab(limit: int = 30) -> dict:
+    now = _now()
+    with _lock, _connect() as conn:
+        cards = [dict(r) for r in conn.execute(
+            "SELECT * FROM vocab WHERE due IS NULL OR due <= ? ORDER BY due IS NOT NULL, due, id LIMIT ?",
+            (now, limit))]
+        total = conn.execute("SELECT COUNT(*) FROM vocab").fetchone()[0]
+        due_count = conn.execute("SELECT COUNT(*) FROM vocab WHERE due IS NULL OR due <= ?", (now,)).fetchone()[0]
+    return {"cards": cards, "due": due_count, "total": total}
+
+
+def review_vocab(vocab_id: int, remembered: bool) -> dict:
+    from datetime import timedelta
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT box FROM vocab WHERE id = ?", (vocab_id,)).fetchone()
+        if row is None:
+            raise KeyError(vocab_id)
+        box = min((row["box"] or 0) + 1, len(REVIEW_INTERVAL_DAYS) - 1) if remembered else 0
+        # 忘記的字 10 分鐘後再出現；記得的依盒子間隔
+        delta = timedelta(days=REVIEW_INTERVAL_DAYS[box]) if remembered else timedelta(minutes=10)
+        due = (datetime.now() + delta).isoformat(timespec="seconds")
+        conn.execute("UPDATE vocab SET box = ?, due = ?, reviews = reviews + 1, lapses = lapses + ? WHERE id = ?",
+                     (box, due, 0 if remembered else 1, vocab_id))
+    return {"box": box, "due": due}
+
+
+def export_anki_tsv() -> str:
+    """Anki 可直接匯入的 TSV：正面為單字，背面為譯名、例句與出處。"""
+    import html as _html
+    lines = ["#separator:tab", "#html:true", "#tags column:3"]
+    for v in list_vocab():
+        back = _html.escape(v.get("translation") or "")
+        if v.get("context"):
+            back += f"<br><br><i>{_html.escape(v['context'])}</i>"
+        if v.get("doc"):
+            back += f"<br><small>{_html.escape(v['doc'])}</small>"
+        tag = "PaperAI " + (v.get("category") or "").replace(" ", "_")
+        term = _html.escape(v["term"])
+        lines.append("\t".join(x.replace("\t", " ").replace("\n", " ") for x in (term, back, tag.strip())))
+    return "\n".join(lines) + "\n"

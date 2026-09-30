@@ -15,6 +15,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **術語比對只有一個實作**：`glossary.term_pattern`。翻譯時挑出本段術語、aliases 改正、閱讀器標示、服務端判斷哪些區塊受術語修改影響，全部用它。
 - **服務的排程（session.Worker）**：單一執行緒處理所有 GPU 工作。優先順序依序是轉檔、有人正在看的文件、30 分鐘內看過的文件。閱讀頁用 IntersectionObserver 回報可見區塊（`/focus`），`DocSession._pick` 先翻這些，再從該位置往後。結果以 SSE 推送 `block`／`progress`／`status`／`meta`／`stale` 事件；reader.js 的 `handlers` 對應處理。
 - **未翻譯區塊保留 `items`，已翻譯的有 `units`**：`render_block` 依此決定輸出等待中或對照版本。服務在 `DocSession.originals` 保留原始區塊，術語修改後才能重翻。
+- **原版面檢視依賴 `block["page"]`**：`pages.assign_pages` 在 `DocSession.__init__` 切完區塊後、複製 `originals` 之前執行（否則重翻的區塊會失去頁碼）；`render_block` 把它輸出成 `data-page`，reader.js 的 `pdfView` 用它找出目前 PDF 頁的譯文、回報翻譯優先順序。頁碼是 PDF 的 0 起算索引（與 Marker 的 page_id、圖片檔名一致），頁碼範圍文件（`_p374-423`）也用整本 PDF 的絕對頁碼。
+- **表格也是可翻譯區塊**：保留 `source`，翻譯後多一個 `zh_source`（逐格翻譯後重組的 Markdown 表格），`units` 為空陣列；`restore_translations` 要一併還原 `zh_source`。
 - **閱讀器 HTML 同一份模板兩種模式**：`render_reader_html(server_mode=...)`。靜態檔的生字本存 localStorage、選字查詢打 `http://127.0.0.1:8000`；服務模式的生字本存 SQLite，並可修正術語。`.server-only`／`.static-only` 元素由 JS 切換顯示。
 
 ## 驗證方式
@@ -23,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. 語法檢查：`python -m py_compile server.py translate.py pdftomd.py paperai/*.py tools/bench_models.py`
 2. CLI 端對端：`python translate.py --input "1804.03318v2.md" --limit 25`（輸出 `_preview_*`，不覆蓋完整版）。1804.03318v2 是篇短論文，Markdown 已經轉好；快取命中時幾秒內完成。
-3. 本機服務：用 `.claude/launch.json` 的 `paperai-server` 啟動（port 8000），在瀏覽器面板開 `/` 與 `/read/<名稱>/`。面板隱藏時視窗大小是 0×0，IntersectionObserver 不會觸發、區塊高度也會異常；需要先用 resize_window 設定大小，或直接 fetch `/api/docs/<名稱>/focus` 模擬捲動。
+3. 本機服務：用 `.claude/launch.json` 的 `paperai-server` 啟動（port 8000）；使用者自己的服務若正在 8000 轉檔，改用 `paperai-test`（port 8001，共用同一個 output/ 與 library.db，測試時別動使用者的生字與術語），在瀏覽器面板開 `/` 與 `/read/<名稱>/`。面板隱藏時視窗大小是 0×0，IntersectionObserver 不會觸發、區塊高度也會異常；需要先用 resize_window 設定大小，或直接 fetch `/api/docs/<名稱>/focus` 模擬捲動。
 4. 只改模板或渲染：`python translate.py --input "xxx.md" --render-only`；服務模式則重新整理頁面即可。
 5. 修改提示詞或換模型：`python tools/bench_models.py --input "1804.03318v2.md" --models <模型...>`，看對齊率與 `output/<名稱>/bench/` 的逐句對照報告。
 

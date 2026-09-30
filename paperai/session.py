@@ -19,6 +19,7 @@ from .blocks import TRANSLATABLE_TYPES, parse_blocks
 from .convert import convert_pdf
 from .glossary import build_glossary, generate_glossary, load_user_glossary, term_pattern
 from .llm import save_json_atomic
+from .pages import assign_pages
 from .pipeline import build_knowledge, prepare, restore_translations
 from .render import render_block, render_glossary_rows, render_reader, render_reader_html
 from .translator import TranslationCache, translate_block
@@ -36,6 +37,9 @@ class DocSession:
         self.doc = config.Doc(name)
         self.markdown = self.doc.load_markdown()
         self.blocks = parse_blocks(self.markdown)
+        # 原版面檢視需要每個區塊的頁碼；必須在複製 originals 之前，重翻的區塊才會保留頁碼
+        self.pdf_path = library.source_pdf(name)
+        self.pdf_pages = assign_pages(self.blocks, self.doc.path("_meta.json"), self.pdf_path)
         self.by_id = {b["id"]: b for b in self.blocks}
         self.order = [b["id"] for b in self.blocks if b["type"] in TRANSLATABLE_TYPES]
         # 保留未翻譯的原始區塊，修改術語後重新翻譯時使用
@@ -67,7 +71,30 @@ class DocSession:
     def page_html(self) -> str:
         with self.lock:
             knowledge = build_knowledge(self.doc, self.paper_map or {}, self.glossary, self.blocks)
-            return render_reader_html(knowledge, config.MODEL_NAME, self.name, server_mode=True)
+            pdf = {"url": "source.pdf", "pages": self.pdf_pages} if self.pdf_path else None
+            return render_reader_html(knowledge, config.MODEL_NAME, self.name, server_mode=True, pdf=pdf)
+
+    def block_material(self, bid: str) -> dict:
+        """問 Claude 用：區塊的原文、目前譯文、圖片路徑與文件資訊。"""
+        import re
+        with self.lock:
+            block = self.by_id.get(bid)
+            if block is None:
+                raise KeyError(bid)
+            original = self.originals.get(bid, {})
+            text = "\n".join(original.get("items", [])) or block.get("source", "")
+            translation = "\n".join(s["zh"] for unit in block.get("units", []) for s in unit)
+            if block["type"] == "table":
+                translation = block.get("zh_source", "")
+            image = None
+            m = re.search(r"!\[[^\]]*\]\(([^)\s]+)\)", block.get("source", ""))
+            if m:
+                candidate = (self.doc.output_dir / m.group(1)).resolve()
+                if self.doc.output_dir.resolve() in candidate.parents and candidate.is_file():
+                    image = candidate
+            paper_map = self.paper_map or {}
+            return {"type": block["type"], "text": text, "translation": translation, "image": image,
+                    "context": {"title": paper_map.get("title", self.name), "domain": paper_map.get("domain", "")}}
 
     def set_status(self, text: str):
         self.status = text

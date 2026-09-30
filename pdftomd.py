@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from paperai import config
+from paperai import library
 from paperai.convert import convert_pdf
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -32,6 +33,7 @@ def main():
     if not pdf_path.is_file():
         pdf_path = config.PROJECT_ROOT / "input" / args.pdf
     name = convert_pdf(pdf_path, args.pages, force_ocr=args.force_ocr)
+    library.record_source(name, pdf_path, args.pages)  # 書庫與原版面檢視需要知道原始 PDF
     print(f"接著執行：python translate.py --input \"{name}.md\"，或用 python server.py 在書庫中開啟")
 
 

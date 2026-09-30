@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>生字複習</title>
+<style>
+:root {
+    --bg: #f8fafc; --card: #ffffff; --border: #e2e8f0; --text: #1e293b; --muted: #64748b;
+    --accent: #3b82f6; --accent-hover: #1d4ed8; --ok: #16a34a; --danger: #dc2626; --mark: #fef3c7;
+}
+@media (prefers-color-scheme: dark) {
+    :root { --bg: #0b0f19; --card: #161b26; --border: #2a3345; --text: #f1f5f9; --muted: #a3b1c6;
+            --accent: #60a5fa; --accent-hover: #3b82f6; --ok: #4ade80; --danger: #f87171; --mark: rgba(250, 204, 21, 0.25); }
+}
+* { box-sizing: border-box; }
+body { margin: 0 auto; max-width: 720px; padding: 2rem 1rem; background: var(--bg); color: var(--text);
+       font-family: 'Noto Sans TC', 'Microsoft JhengHei', 'PingFang TC', system-ui, sans-serif; line-height: 1.6; }
+header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+h1 { font-size: 1.4rem; margin: 0; }
+a { color: var(--accent); }
+.stats { color: var(--muted); font-size: 0.9rem; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 2rem 1.5rem; min-height: 280px;
+        display: flex; flex-direction: column; gap: 1rem; }
+.term { font-family: 'Times New Roman', Times, serif; font-size: 2rem; font-weight: 700; text-align: center; }
+.context { color: var(--muted); font-family: 'Times New Roman', Times, serif; font-size: 1.05rem; border-left: 3px solid var(--border); padding-left: 1rem; }
+.context mark { background: var(--mark); color: inherit; padding: 0 2px; }
+.answer { border-top: 1px dashed var(--border); padding-top: 1rem; text-align: center; }
+.answer .translation { font-size: 1.4rem; font-weight: 700; color: var(--danger); }
+.meta { color: var(--muted); font-size: 0.8rem; }
+.actions { display: flex; gap: 0.75rem; justify-content: center; margin-top: 1.25rem; flex-wrap: wrap; }
+button { border: 0; border-radius: 8px; padding: 0.7rem 1.4rem; font: inherit; font-weight: 700; cursor: pointer; color: #fff; background: var(--accent); min-width: 8rem; }
+button:hover { background: var(--accent-hover); }
+button.forgot { background: var(--danger); }
+button.remember { background: var(--ok); }
+.hint { color: var(--muted); font-size: 0.8rem; text-align: center; margin-top: 0.75rem; }
+.done { text-align: center; color: var(--muted); justify-content: center; align-items: center; }
+</style>
+</head>
+<body>
+<header>
+    <h1>生字複習</h1>
+    <span class="stats" id="stats"></span>
+    <span><a href="/">書庫</a>　·　<a href="/api/vocab/export.tsv">匯出 Anki</a></span>
+</header>
+
+<div class="card" id="card"><p class="meta">載入中…</p></div>
+<div class="actions" id="actions" hidden>
+    <button id="show">顯示答案</button>
+    <button class="forgot" id="forgot" hidden>忘記了</button>
+    <button class="remember" id="remember" hidden>記得</button>
+</div>
+<p class="hint">快捷鍵：空白鍵顯示答案，1 忘記了，2 記得。記得的字會間隔 1、2、4、8… 天後再出現；忘記的字 10 分鐘後重來。</p>
+
+<script>
+(() => {
+    const $ = (id) => document.getElementById(id);
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+    let queue = [];
+    let current = null;
+    let reviewed = 0;
+    let revealed = false;
+
+    function highlight(context, term) {
+        const safe = esc(context);
+        const pattern = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+        return safe.replace(pattern, (m) => `<mark>${m}</mark>`);
+    }
+
+    function show() {
+        current = queue.shift();
+        revealed = false;
+        if (!current) {
+            $('card').className = 'card done';
+            $('card').innerHTML = reviewed
+                ? `<p>今天的複習完成了（${reviewed} 張）。</p>`
+                : '<p>目前沒有需要複習的生字。在閱讀器中點術語或選取單字即可加入生字本。</p>';
+            $('actions').hidden = true;
+            return;
+        }
+        $('card').className = 'card';
+        $('card').innerHTML = `<div class="term">${esc(current.term)}</div>` +
+            (current.context ? `<div class="context">${highlight(current.context, current.term)}</div>` : '') +
+            `<div class="answer" id="answer" hidden><div class="translation">${esc(current.translation || '（無譯名）')}</div>` +
+            `<div class="meta">${esc(current.category || '')}${current.doc ? ' · ' + esc(current.doc) : ''}` +
+            ` · 第 ${current.box || 0} 盒 · 複習 ${current.reviews || 0} 次</div></div>`;
+        $('actions').hidden = false;
+        $('show').hidden = false;
+        $('forgot').hidden = $('remember').hidden = true;
+    }
+
+    function reveal() {
+        if (!current || revealed) return;
+        revealed = true;
+        $('answer').hidden = false;
+        $('show').hidden = true;
+        $('forgot').hidden = $('remember').hidden = false;
+    }
+
+    async function answer(remembered) {
+        if (!current || !revealed) return;
+        const card = current;
+        await fetch(`/api/vocab/${card.id}/review`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({remembered})
+        });
+        reviewed++;
+        if (!remembered) queue.push(card);  // 本輪結束前再出現一次
+        updateStats();
+        show();
+    }
+
+    function updateStats(total) {
+        if (total !== undefined) updateStats.total = total;
+        $('stats').textContent = `剩餘 ${queue.length + (current ? 1 : 0)} 張　·　已複習 ${reviewed}　·　生字本共 ${updateStats.total ?? '—'} 個`;
+    }
+
+    $('show').addEventListener('click', reveal);
+    $('forgot').addEventListener('click', () => answer(false));
+    $('remember').addEventListener('click', () => answer(true));
+    document.addEventListener('keydown', (e) => {
+        if (e.key === ' ') { e.preventDefault(); reveal(); }
+        if (e.key === '1') answer(false);
+        if (e.key === '2') answer(true);
+    });
+
+    fetch('/api/vocab/due?limit=50').then((r) => r.json()).then((data) => {
+        queue = data.cards;
+        show();
+        updateStats(data.total);
+    }).catch(() => { $('card').innerHTML = '<p class="meta">無法連線到本機服務。</p>'; });
+})();
+</script>
+</body>
+</html>

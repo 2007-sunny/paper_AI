@@ -53,15 +53,22 @@
     window.addEventListener('resize', remeasure);
 
     // ---------- 檢視模式與主題 ----------
+    const hasPdf = serverMode && !!(config.pdf && config.pdf.pages && config.pdf.pages.length);
+    let onViewChange = () => {};  // 原版面模組載入後會替換
     function switchView(mode) {
+        if (mode === 'pdf' && !hasPdf) mode = 'parallel';
+        const previous = document.body.getAttribute('data-view');
         document.body.setAttribute('data-view', mode);
         document.querySelectorAll('.tab-btn').forEach((btn) =>
             btn.classList.toggle('active', btn.dataset.viewBtn === mode));
+        $('pdf-view').hidden = mode !== 'pdf';
         save('paperai_view', mode);
         remeasure();  // 對照與單欄的欄寬不同
+        onViewChange(mode, previous);
     }
     document.querySelectorAll('.tab-btn').forEach((btn) =>
         btn.addEventListener('click', () => switchView(btn.dataset.viewBtn)));
+    $('pdf-tab').hidden = !hasPdf;
     switchView(load('paperai_view', 'parallel'));
 
     $('theme-toggle').addEventListener('click', () => {
@@ -325,7 +332,8 @@
         setTimeout(() => {
             const sel = window.getSelection();
             const term = sel ? cleanTerm(sel.toString()) : '';
-            if (!term || !sel.rangeCount || !content.contains(sel.anchorNode)) {
+            const inReader = content.contains(sel?.anchorNode) || $('pdf-side-body').contains(sel?.anchorNode);
+            if (!term || !sel.rangeCount || !inReader) {
                 popup.style.display = 'none';
                 return;
             }
@@ -370,6 +378,8 @@
                     clearTimeout(tocTimer);
                     tocTimer = setTimeout(buildToc, 500);
                 }
+                pdfView.blockUpdated(el);
+                askUI.decorate(el);
             },
             stale(msg) { msg.ids.forEach((id) => $(id)?.classList.add('stale')); },
             progress(msg) {
@@ -402,8 +412,9 @@
         function reportFocus() {
             clearTimeout(focusTimer);
             focusTimer = setTimeout(() => {
-                const ids = [...document.querySelectorAll('.block.pair')]
-                    .filter((el) => visible.has(el.id)).map((el) => el.id);
+                // 原版面檢視時，文字區塊被隱藏，改用目前 PDF 頁上的區塊
+                const ids = document.body.dataset.view === 'pdf' ? pdfView.visibleBlockIds()
+                    : [...document.querySelectorAll('.block.pair')].filter((el) => visible.has(el.id)).map((el) => el.id);
                 if (ids.length) postJson(`${docApi}/focus`, { visible: ids }).catch(() => {});
             }, 400);
         }
@@ -412,6 +423,186 @@
             reportFocus();
         }, { rootMargin: '200px 0px 600px 0px' });
         document.querySelectorAll('.block.pair').forEach((el) => observer.observe(el));
+
+        // ---------- 原版面檢視：左邊 PDF.js，右邊目前頁的譯文 ----------
+        var pdfView = (() => {
+            const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+            const pagesBox = $('pdf-pages');
+            const sideBody = $('pdf-side-body');
+            let pdfDoc = null;
+            let loading = null;
+            let current = null;
+
+            function loadScript(src) {
+                return new Promise((resolve, reject) => {
+                    const s = document.createElement('script');
+                    s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('無法載入 PDF.js（需要網路）'));
+                    document.head.appendChild(s);
+                });
+            }
+
+            async function renderPage(holder) {
+                if (holder.dataset.rendered) return;
+                holder.dataset.rendered = '1';
+                const page = await pdfDoc.getPage(Number(holder.dataset.page) + 1);
+                const base = page.getViewport({ scale: 1 });
+                const scale = holder.clientWidth * (window.devicePixelRatio || 1) / base.width;
+                const viewport = page.getViewport({ scale });
+                const canvas = document.createElement('canvas');
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                holder.style.aspectRatio = `${base.width} / ${base.height}`;
+                holder.prepend(canvas);
+                await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+            }
+
+            const lazy = new IntersectionObserver((entries) => {
+                entries.forEach((en) => { if (en.isIntersecting) renderPage(en.target).catch(() => {}); });
+            }, { rootMargin: '1200px 0px' });
+
+            async function load() {
+                if (loading) return loading;
+                loading = (async () => {
+                    if (!window.pdfjsLib) await loadScript(PDFJS + 'pdf.min.js');
+                    pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.js';
+                    pdfDoc = await pdfjsLib.getDocument(config.pdf.url).promise;
+                    const first = (await pdfDoc.getPage(config.pdf.pages[0] + 1)).getViewport({ scale: 1 });
+                    pagesBox.innerHTML = config.pdf.pages.filter((p) => p < pdfDoc.numPages).map((p) =>
+                        `<div class="pdf-page" data-page="${p}" style="aspect-ratio:${first.width} / ${first.height}">` +
+                        `<span class="pdf-page-num">p.${p + 1}</span></div>`).join('');
+                    pagesBox.querySelectorAll('.pdf-page').forEach((el) => lazy.observe(el));
+                })().catch((e) => { pagesBox.innerHTML = `<p class="pdf-loading">${escapeHtml(e.message)}</p>`; loading = null; });
+                return loading;
+            }
+
+            function refreshSide() {
+                $('pdf-side-page').textContent = current === null ? '—' : current + 1;
+                const sections = [...content.querySelectorAll(`section.pair[data-page="${current}"]`)];
+                if (!sections.length) {
+                    sideBody.innerHTML = '<p class="empty-state">這一頁沒有需要翻譯的文字（可能是圖表或公式）。</p>';
+                    return;
+                }
+                sideBody.innerHTML = sections.map((s) => {
+                    const zh = s.querySelector('.lang.zh');
+                    return `<div class="side-block${s.classList.contains('pending') ? ' pending' : ''}" data-block="${s.id}">${zh ? zh.innerHTML : ''}</div>`;
+                }).join('');
+            }
+
+            function setCurrent(page) {
+                if (page === current) return;
+                current = page;
+                pagesBox.querySelectorAll('.pdf-page.current').forEach((el) => el.classList.remove('current'));
+                pagesBox.querySelector(`.pdf-page[data-page="${page}"]`)?.classList.add('current');
+                refreshSide();
+                reportFocus();
+            }
+
+            // 視窗上方 1/3 處所在的頁即為目前頁
+            let ticking = false;
+            window.addEventListener('scroll', () => {
+                if (document.body.dataset.view !== 'pdf' || ticking) return;
+                ticking = true;
+                requestAnimationFrame(() => {
+                    ticking = false;
+                    const y = window.innerHeight / 3;
+                    const hit = [...pagesBox.querySelectorAll('.pdf-page')].find((el) => {
+                        const r = el.getBoundingClientRect();
+                        return r.top <= y && r.bottom >= y;
+                    });
+                    if (hit) setCurrent(Number(hit.dataset.page));
+                });
+            }, { passive: true });
+
+            async function open() {
+                // 從文字檢視切過來時，跳到目前閱讀段落所在的頁
+                const firstVisible = [...content.querySelectorAll('section[data-page]')].find((s) => visible.has(s.id));
+                const target = firstVisible ? Number(firstVisible.dataset.page) : (current ?? config.pdf.pages[0]);
+                await load();
+                const holder = pagesBox.querySelector(`.pdf-page[data-page="${target}"]`);
+                if (holder) holder.scrollIntoView({ block: 'start' });
+                current = null;
+                setCurrent(target);
+            }
+
+            onViewChange = (mode, previous) => {
+                if (mode === 'pdf' && previous !== 'pdf') open();
+                if (previous === 'pdf' && mode !== 'pdf' && current !== null) {
+                    // 回到文字檢視時，停在 PDF 目前頁的第一個段落
+                    content.querySelector(`section[data-page="${current}"]`)?.scrollIntoView({ block: 'start' });
+                }
+            };
+
+            return {
+                blockUpdated(el) { if (current !== null && Number(el.dataset.page) === current) refreshSide(); },
+                visibleBlockIds() {
+                    if (current === null) return [];
+                    return [...content.querySelectorAll(`section.pair[data-page="${current}"], section.pair[data-page="${current + 1}"]`)].map((s) => s.id);
+                },
+                start() { if (document.body.dataset.view === 'pdf') open(); },
+            };
+        })();
+        pdfView.start();
+
+        // ---------- 問 Claude：困難段落、翻譯檢查、看圖 ----------
+        var askUI = (() => {
+            let blockId = null;
+            let busy = false;
+
+            function decorate(section) {
+                if (!(section.classList.contains('pair') || section.classList.contains('block-image'))) return;
+                if (section.querySelector(':scope > .ask-btn')) return;
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'ask-btn';
+                btn.textContent = '問 Claude';
+                btn.dataset.askBlock = section.id;
+                section.appendChild(btn);
+            }
+
+            function open(id) {
+                const section = $(id);
+                if (!section) return;
+                blockId = id;
+                const isImage = section.classList.contains('block-image');
+                const source = isImage ? section.querySelector('figure') : section.querySelector('.lang.en');
+                $('ask-source').innerHTML = source ? source.innerHTML : '';
+                $('ask-explain').hidden = $('ask-translate').hidden = isImage;
+                $('ask-figure').hidden = !isImage;
+                $('ask-translate').hidden = isImage || section.classList.contains('pending');
+                $('ask-answer').innerHTML = '';
+                $('ask-input').value = '';
+                $('ask-modal').classList.add('open');
+            }
+
+            async function ask(mode) {
+                if (busy || !blockId) return;
+                busy = true;
+                const answer = $('ask-answer');
+                answer.innerHTML = '<p class="thinking">Claude 思考中，可能需要數十秒…</p>';
+                try {
+                    const res = await postJson(`${docApi}/ask`, { block: blockId, mode, question: $('ask-input').value });
+                    answer.innerHTML = res.html + `<p class="hint">回答模型：${escapeHtml(res.model)}</p>`;
+                    typeset(answer);
+                } catch (e) {
+                    answer.innerHTML = `<p class="error">${escapeHtml(e.message)}</p>`;
+                } finally {
+                    busy = false;
+                }
+            }
+
+            document.addEventListener('click', (e) => {
+                const btn = e.target.closest('[data-ask-block]');
+                if (btn) { e.stopPropagation(); open(btn.dataset.askBlock); }
+            });
+            document.querySelectorAll('[data-ask-mode]').forEach((b) =>
+                b.addEventListener('click', () => ask(b.dataset.askMode)));
+            $('ask-send').addEventListener('click', () => ask($(blockId)?.classList.contains('block-image') ? 'figure' : 'explain'));
+            $('ask-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('ask-send').click(); });
+            $('ask-close').addEventListener('click', () => $('ask-modal').classList.remove('open'));
+            $('ask-modal').addEventListener('click', (e) => { if (e.target === $('ask-modal')) $('ask-modal').classList.remove('open'); });
+            content.querySelectorAll('section').forEach(decorate);
+            return { decorate };
+        })();
     }
 
     refreshVocab();

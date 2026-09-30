@@ -46,6 +46,8 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
 .hint { color: var(--muted); font-size: 0.8rem; margin-top: 0.5rem; }
 .scroll { max-height: 420px; overflow-y: auto; }
 .error { color: var(--danger); font-size: 0.85rem; min-height: 1.2em; }
+.nav-link { color: var(--accent); text-decoration: none; font-weight: 600; font-size: 0.9rem; border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.8rem; background: var(--card); }
+.nav-link:hover { border-color: var(--accent); }
 @media (max-width: 640px) {
     .doc { flex-direction: column; align-items: flex-start; }
     .progress { align-items: flex-start; }
@@ -54,7 +56,10 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
 </style>
 </head>
 <body>
-<h1>PaperAI 書庫</h1>
+<div class="row" style="justify-content: space-between">
+    <h1>PaperAI 書庫</h1>
+    <span class="row"><a class="nav-link" href="/review">生字複習</a><a class="nav-link" href="/api/vocab/export.tsv">匯出 Anki</a></span>
+</div>
 <p class="sub" id="subtitle">本機翻譯模型：…</p>
 
 <section class="card">

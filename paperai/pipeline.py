@@ -38,8 +38,9 @@ def restore_translations(blocks: list, knowledge_path) -> int:
         if block["type"] in TRANSLATABLE_TYPES and "items" in block and old \
                 and old["src"] == source_hash(block["items"]) and units_are_valid(old["units"]):
             block.pop("items")
-            for key in ("units", "aligned", "terms", "src"):
-                block[key] = old[key]
+            for key in ("units", "aligned", "terms", "src", "zh_source"):
+                if key in old:
+                    block[key] = old[key]
             restored += 1
     return restored
 

@@ -118,7 +118,27 @@ def _render_pending_lang(block: dict) -> str:
 
 
 def render_block(block: dict, glossary: dict) -> str:
+    html_out = _render_block_body(block, glossary)
+    if "page" in block:  # 原版面檢視依頁碼找出該頁的譯文
+        html_out = html_out.replace("<section ", f'<section data-page="{block["page"]}" ', 1)
+    return html_out
+
+
+def _render_table(block: dict) -> str:
+    """表格：已翻譯時左右（或上下）各一份，未翻譯時只顯示原表。"""
     kind, bid = block["type"], block["id"]
+    en = f'<div class="table-wrap">{render_markdown(block["source"])}</div>'
+    if "zh_source" not in block:
+        return f'<section class="block full block-{kind}" id="{bid}">{en}</section>'
+    zh = f'<div class="table-wrap">{render_markdown(block["zh_source"])}</div>'
+    return (f'<section class="block pair block-{kind}" id="{bid}">'
+            f'<div class="lang en" lang="en">{en}</div><div class="lang zh" lang="zh-Hant">{zh}</div></section>')
+
+
+def _render_block_body(block: dict, glossary: dict) -> str:
+    kind, bid = block["type"], block["id"]
+    if kind == "table":
+        return _render_table(block)
     if "items" in block:
         return (f'<section class="block pair block-{kind} pending" id="{bid}">'
                 f'<div class="lang en" lang="en">{_render_pending_lang(block)}</div>'
@@ -141,8 +161,6 @@ def render_block(block: dict, glossary: dict) -> str:
         body = f'<div class="math-body">{html.escape(latex, quote=False)}</div>{tag_html}'
     elif kind == "image":
         body = f"<figure>{render_inline(src)}</figure>"
-    elif kind == "table":
-        body = f'<div class="table-wrap">{render_markdown(src)}</div>'
     elif kind == "code":
         body = f"<pre><code>{html.escape(src)}</code></pre>"
     else:  # html
@@ -178,8 +196,12 @@ def render_reader(knowledge: dict, output_path, model_name: str, base_name: str)
     Path(output_path).write_text(render_reader_html(knowledge, model_name, base_name), encoding="utf-8")
 
 
-def render_reader_html(knowledge: dict, model_name: str, base_name: str, server_mode: bool = False) -> str:
-    """server_mode=True 時由本機服務提供：生字本存 SQLite、翻譯結果即時推送、可修正術語。"""
+def render_reader_html(knowledge: dict, model_name: str, base_name: str, server_mode: bool = False,
+                       pdf: dict = None) -> str:
+    """server_mode=True 時由本機服務提供：生字本存 SQLite、翻譯結果即時推送、可修正術語。
+
+    pdf={"url", "pages"} 時啟用原版面檢視（只有本機服務能提供原始 PDF）。
+    """
     glossary_list = knowledge.get("glossary", [])
     glossary = {g["term"].lower(): g for g in glossary_list}
     paper_map = knowledge.get("paper_map", {})
@@ -191,7 +213,7 @@ def render_reader_html(knowledge: dict, model_name: str, base_name: str, server_
 
     page_config = {"baseName": base_name, "defaultModel": model_name, "serverMode": server_mode,
                    # 靜態檔以 file:// 開啟時需要完整網址；由服務提供時用相對路徑
-                   "apiBase": "" if server_mode else "http://127.0.0.1:8000"}
+                   "apiBase": "" if server_mode else "http://127.0.0.1:8000", "pdf": pdf}
     replacements = {
         "__TITLE__": _esc(meta.get("title") or base_name),
         "__DOMAIN__": _esc(paper_map.get("domain", "")),

@@ -191,7 +191,45 @@ a.tool-btn { text-decoration: none; display: inline-flex; align-items: center; }
 .toc a .toc-zh { color: var(--text-secondary); font-size: 0.8rem; margin-left: 0.4rem; }
 .term-edit input { width: 100%; margin-top: 0.3rem; padding: 0.5rem; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-panel); color: var(--text-primary); font: inherit; }
 
+/* ---------- 問 Claude ---------- */
+.block { position: relative; }
+.ask-btn { position: absolute; top: -0.6rem; right: -0.6rem; display: none; z-index: 5; background: var(--bg-panel); color: var(--accent-secondary);
+           border: 1px solid var(--border-color); border-radius: 999px; font: 600 0.75rem var(--font-zh); padding: 0.15rem 0.6rem; cursor: pointer; box-shadow: var(--card-shadow); }
+.block:hover > .ask-btn { display: block; }
+.ask-btn:hover { border-color: var(--accent-primary); }
+.ask-modal { max-width: 760px; }
+.ask-source { max-height: 8rem; overflow-y: auto; font-size: 0.85rem; color: var(--text-secondary); background: var(--bg-panel); border-radius: 6px; padding: 0.6rem 0.8rem; margin: 0.75rem 0; font-family: var(--font-serif); }
+.ask-source img { max-height: 6rem; }
+.row-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.ask-question { display: flex; gap: 0.5rem; margin-top: 0.6rem; }
+.ask-question input { flex: 1; padding: 0.45rem 0.6rem; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-panel); color: var(--text-primary); font: inherit; }
+.ask-answer { margin-top: 1rem; line-height: 1.8; }
+.ask-answer:empty { display: none; }
+.ask-answer p + p, .ask-answer ul, .ask-answer ol { margin-top: 0.6rem; }
+.ask-answer .thinking { color: var(--text-secondary); font-style: italic; }
+.ask-answer .error { color: var(--danger); }
+
+/* ---------- 原版面檢視（PDF.js + 側欄譯文） ---------- */
+[data-view="pdf"] .reader-content,
+[data-view="pdf"] .glossary-widget { display: none; }
+[data-view="pdf"] body, body[data-view="pdf"] { max-width: none; }
+.pdf-view { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 1.25rem; align-items: start; }
+.pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 1rem; min-width: 0; }
+.pdf-page { position: relative; width: 100%; background: #fff; box-shadow: var(--card-shadow); border: 1px solid var(--border-color); }
+.pdf-page canvas { display: block; width: 100%; height: auto; }
+.pdf-page.current { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.pdf-page-num { position: absolute; top: 0.4rem; left: 0.5rem; font: 0.75rem var(--font-zh); color: #64748b; background: rgba(255,255,255,0.85); padding: 0 0.4rem; border-radius: 4px; }
+.pdf-loading { color: var(--text-secondary); font-family: var(--font-zh); }
+.pdf-side { position: sticky; top: 5rem; max-height: calc(100vh - 6rem); overflow-y: auto; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; box-shadow: var(--card-shadow); font-family: var(--font-zh); }
+.pdf-side-head { position: sticky; top: 0; background: var(--bg-panel); border-bottom: 1px solid var(--border-color); padding: 0.6rem 1rem; font-weight: 700; color: var(--accent-secondary); z-index: 1; }
+.pdf-side-body { padding: 1rem 1.25rem; font-size: 1rem; line-height: 1.8; }
+.pdf-side-body .side-block { margin-bottom: 1rem; }
+.pdf-side-body .side-block.pending { color: var(--text-secondary); font-style: italic; }
+.pdf-side-body .empty-state { text-align: left; }
+
 @media (max-width: 820px) {
+    .pdf-view { grid-template-columns: 1fr; }
+    .pdf-side { position: static; max-height: none; }
     body { padding: 1rem; font-size: 1rem; }
     .header { padding: 1.25rem; }
     .header-title { font-size: 1.4rem; }

@@ -196,6 +196,57 @@ def units_are_valid(units: list) -> bool:
     return not any(u["zh"] == FAILED_TEXT or translation_problem(u["en"], u["zh"]) for unit in units for u in unit)
 
 
+_TABLE_SEPARATOR_RE = re.compile(r"^\s*:?-{3,}:?\s*$")
+_CELL_TEXT_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+def _table_rows(source: str) -> list:
+    """Markdown 表格 → 每列的儲存格清單；非表格列（理論上不會有）原樣保留為字串。"""
+    rows = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        rows.append([c.strip() for c in stripped.strip("|").split("|")] if stripped.startswith("|") else line)
+    return rows
+
+
+def _cell_needs_translation(cell: str) -> bool:
+    if _TABLE_SEPARATOR_RE.match(cell):
+        return False
+    # 去掉公式與 HTML 後仍有英文單字才翻譯；純數字、單位符號、公式照舊
+    plain = re.sub(r"\$[^$]*\$|<[^>]+>", " ", cell)
+    return bool(_CELL_TEXT_RE.search(plain))
+
+
+def translate_table(block: dict, paper_map: dict, glossary: list, cache: TranslationCache, model: str) -> bool:
+    """只翻譯含英文的儲存格，組回一份中文表格存在 zh_source；數字與公式原樣保留。"""
+    source = block["source"]
+    rows = _table_rows(source)
+    cells = list(dict.fromkeys(c for row in rows if isinstance(row, list) for c in row if _cell_needs_translation(c)))
+    terms = find_matching_terms(source, glossary)
+    called = False
+    mapping = {}
+    if cells:
+        key = TranslationCache.key(model, ["<table>"] + cells, terms)
+        cached = cache.get(key)
+        if cached and not cached_is_valid(cells, cached):
+            cached = None
+        if cached is None:
+            result = translate_sentences(cells, paper_map, terms, model)
+            cached = {"zh": result.zh, "aligned": result.aligned}
+            cache.set(key, cached)
+            called = True
+        if cached["aligned"]:
+            zh = [_repair_control_chars(z) for z in cached["zh"]]
+            mapping = {c: apply_aliases(c, z, terms).replace("|", "／") for c, z in zip(cells, zh)}
+    zh_lines = ["| " + " | ".join(mapping.get(c, c) for c in row) + " |" if isinstance(row, list) else row
+                for row in rows]
+    block["zh_source"] = "\n".join(zh_lines)
+    block["units"] = []  # 表格沒有逐句對照；保留欄位讓進度統計一致
+    block["aligned"] = bool(mapping) or not cells
+    block["terms"] = [g["term"] for g in terms]
+    return called
+
+
 def translate_block(block: dict, paper_map: dict, glossary: list, cache: TranslationCache,
                     model: str = None) -> bool:
     """翻譯 heading/paragraph/list 區塊，將 items 轉為 units（每個 unit 是一串中英句對）。
@@ -204,6 +255,9 @@ def translate_block(block: dict, paper_map: dict, glossary: list, cache: Transla
     """
     model = model or config.MODEL_NAME
     items = block.pop("items")
+    if block["type"] == "table":
+        block["src"] = source_hash(items)
+        return translate_table(block, paper_map, glossary, cache, model)
     block["src"] = source_hash(items)
     unit_sentences = [split_en_sentences(text) or [text] for text in items]
     flat = [s for unit in unit_sentences for s in unit]

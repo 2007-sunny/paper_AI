@@ -11,11 +11,13 @@ import ollama
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
+                               StreamingResponse)
 from pydantic import BaseModel
 
-from . import config, library
+from . import claude_assist, config, library
 from .glossary import upsert_user_term
+from .render import render_markdown
 from .session import Worker
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -118,6 +120,16 @@ def read_page(name: str):
     return worker.session(name).page_html()
 
 
+@app.get("/read/{name}/source.pdf")
+def doc_pdf(name: str):
+    """原版面檢視用的原始 PDF；只提供書庫記錄的那個檔案（支援 Range，大型書籍可分段載入）。"""
+    _doc_dir(name)
+    pdf = library.source_pdf(name)
+    if not pdf:
+        raise HTTPException(404, "找不到這份文件的原始 PDF")
+    return FileResponse(pdf, media_type="application/pdf")
+
+
 @app.get("/read/{name}/{file_path:path}")
 def doc_file(name: str, file_path: str):
     folder = _doc_dir(name)
@@ -171,6 +183,31 @@ def doc_focus(name: str, req: FocusRequest):
     return {"ok": True}
 
 
+class AskRequest(BaseModel):
+    block: str
+    mode: str = "explain"   # explain | translate | figure
+    question: str = ""
+
+
+@app.post("/api/docs/{name}/ask")
+def ask_claude(name: str, req: AskRequest):
+    """把一個區塊（段落、表格或圖片）交給 Claude 解說；會傳送該區塊內容到 Anthropic。"""
+    _doc_dir(name)
+    session = worker.session(name)
+    try:
+        material = session.block_material(req.block)
+    except KeyError:
+        raise HTTPException(404, "找不到這個區塊")
+    mode = "figure" if material["type"] == "image" else req.mode
+    try:
+        result = claude_assist.ask(mode, material["text"] if mode != "figure" else "",
+                                   material["translation"], req.question[:2000],
+                                   material["image"] if mode == "figure" else None, material["context"])
+    except claude_assist.ClaudeUnavailable as e:
+        raise HTTPException(503, str(e))
+    return {"html": render_markdown(result["answer"]), "model": result["model"]}
+
+
 # ---------- 術語與生字本 ----------
 
 class GlossaryRequest(BaseModel):
@@ -211,6 +248,34 @@ def add_vocab(req: VocabRequest):
 def delete_vocab(vocab_id: int):
     library.delete_vocab(vocab_id)
     return {"ok": True}
+
+
+@app.get("/review", response_class=HTMLResponse)
+def review_page():
+    return (TEMPLATE_DIR / "review.html").read_text(encoding="utf-8")
+
+
+@app.get("/api/vocab/due")
+def vocab_due(limit: int = 30):
+    return library.due_vocab(max(1, min(limit, 200)))
+
+
+class ReviewRequest(BaseModel):
+    remembered: bool
+
+
+@app.post("/api/vocab/{vocab_id}/review")
+def review_vocab(vocab_id: int, req: ReviewRequest):
+    try:
+        return library.review_vocab(vocab_id, req.remembered)
+    except KeyError:
+        raise HTTPException(404, "找不到這個生字")
+
+
+@app.get("/api/vocab/export.tsv")
+def export_vocab():
+    return PlainTextResponse(library.export_anki_tsv(), media_type="text/tab-separated-values; charset=utf-8",
+                             headers={"Content-Disposition": "attachment; filename=paperai_vocab_anki.txt"})
 
 
 # ---------- 選字查詢 ----------

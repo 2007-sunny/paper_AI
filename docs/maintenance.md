@@ -16,6 +16,11 @@
 | 背景翻譯時間、存檔頻率 | `session.BACKGROUND_WINDOW`、`SAVE_INTERVAL` |
 | 書庫頁 | `templates/library.html`（內含 JS） |
 | 閱讀頁即時更新 | `templates/reader.js` 的 `if (serverMode)` 區段 |
+| 區塊對應 PDF 頁碼 | `pages.assign_pages`（`MATCH_THRESHOLD`、`LOOKAHEAD`） |
+| 原版面檢視 | 路由 `/read/<名稱>/source.pdf`；前端 `reader.js` 的 `pdfView`（PDF.js 3.11 由 cdnjs 載入） |
+| 表格翻譯 | `translator.translate_table`、`render._render_table` |
+| 生字複習、匯出 Anki | `library.due_vocab`、`review_vocab`（`REVIEW_INTERVAL_DAYS`）、`export_anki_tsv`；頁面 `templates/review.html` |
+| 問 Claude | `claude_assist.ask`（`MODEL`、`MODES`、提示詞）、`DocSession.block_material`、路由 `/api/docs/<名稱>/ask`；前端 `reader.js` 的 `askUI` |
 
 SSE 事件（`/api/docs/<名稱>/events`）：`block`（id、html）、`progress`（done、total、pending）、`status`（text）、`meta`（標題、摘要、術語表列）、`stale`（ids）。
 
