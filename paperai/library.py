@@ -46,7 +46,11 @@ def list_folders() -> list:
 
 
 def add_folder(path: str) -> str:
+    """加入監看資料夾；貼上的是 PDF 檔案路徑時，改為加入它所在的資料夾。"""
+    path = path.strip().strip('"').strip()
     folder = Path(path).expanduser().resolve()
+    if folder.is_file() and folder.suffix.lower() == ".pdf":
+        folder = folder.parent
     if not folder.is_dir():
         raise FileNotFoundError(f"找不到資料夾：{path}")
     with _lock, _connect() as conn:

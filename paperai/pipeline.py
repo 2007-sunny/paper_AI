@@ -6,7 +6,7 @@ from datetime import datetime
 from . import config
 from .blocks import TRANSLATABLE_TYPES
 from .glossary import apply_aliases, build_glossary, generate_glossary, get_paper_map, load_user_glossary
-from .translator import source_hash
+from .translator import source_hash, units_are_valid
 
 
 def prepare(doc: config.Doc, markdown_text: str):
@@ -21,7 +21,10 @@ def prepare(doc: config.Doc, markdown_text: str):
 
 
 def restore_translations(blocks: list, knowledge_path) -> int:
-    """把既有 knowledge JSON 中、原文未變的譯文套回剛切好的區塊，回傳套用數量。"""
+    """把既有 knowledge JSON 中、原文未變的譯文套回剛切好的區塊，回傳套用數量。
+
+    含失控輸出（重複迴圈、原始 JSON 等）的舊譯文不沿用，讓它重新翻譯。
+    """
     if not os.path.exists(knowledge_path):
         return 0
     try:
@@ -33,7 +36,7 @@ def restore_translations(blocks: list, knowledge_path) -> int:
     for block in blocks:
         old = saved.get(block["id"])
         if block["type"] in TRANSLATABLE_TYPES and "items" in block and old \
-                and old["src"] == source_hash(block["items"]):
+                and old["src"] == source_hash(block["items"]) and units_are_valid(old["units"]):
             block.pop("items")
             for key in ("units", "aligned", "terms", "src"):
                 block[key] = old[key]

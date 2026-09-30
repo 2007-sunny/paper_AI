@@ -56,8 +56,11 @@ def _glossary_lines(terms: list) -> str:
     return "\n".join(f"- {g['term']} → {g['translation']}" for g in terms)
 
 
-def build_translation_prompt(sentences: list, paper_map: dict, terms: list) -> str:
+def build_translation_prompt(sentences: list, paper_map: dict, terms: list, plain: bool = False) -> str:
+    """plain=True 時要求直接輸出譯文（只用於整段翻譯）。"""
     numbered = "\n".join(f"[{i}] {s}" for i, s in enumerate(sentences, 1))
+    output = ("請直接輸出譯文，不要加編號、引號或任何說明。" if plain
+              else '請輸出 JSON：{"translations": ["第 1 句譯文", ...]}')
     return f"""你是一位專業學術論文翻譯專家，將科學文獻翻譯為台灣學術界使用的繁體中文。
 
 【論文背景】
@@ -78,7 +81,7 @@ def build_translation_prompt(sentences: list, paper_map: dict, terms: list) -> s
 【英文句子】
 {numbered}
 
-請輸出 JSON：{{"translations": ["第 1 句譯文", ...]}}"""
+{output}"""
 
 
 def _schema(n: int) -> dict:
@@ -92,6 +95,31 @@ def _schema(n: int) -> dict:
 
 
 _NUMBER_PREFIX_RE = re.compile(r"^\s*\[\d+\]\s*")
+# 同一片段連續出現 6 次以上（模型陷入迴圈，如 multiplier multiplier …）
+_REPEAT_RE = re.compile(r"(\S.{0,39}?)(?:\s*\1){5,}")
+# 模型對使用者說話，而不是翻譯（「根據您的指令…更正後的輸出（僅包含 JSON）」）
+_META_RE = re.compile(r"您的指令|根據您的|更正後的輸出|以下是(?:翻譯|譯文)|譯文如下")
+FAILED_TEXT = "（本段翻譯失敗，請參考原文）"
+
+
+def translation_problem(en: str, zh: str):
+    """檢查單句譯文是否為模型的失控輸出；正常時回傳 None，否則回傳原因。"""
+    if not zh.strip():
+        return "空白"
+    if '"translations"' in zh or zh.lstrip().startswith("{"):
+        return "含原始 JSON"
+    if _META_RE.search(zh) or ("JSON" in zh and "JSON" not in en):
+        return "含模型說明文字"
+    if _REPEAT_RE.search(zh) and not _REPEAT_RE.search(en):
+        return "重複迴圈"
+    if len(zh) > 2 * len(en) + 80:
+        return "譯文過長"
+    return None
+
+
+def _usable(sentences: list, zh) -> bool:
+    return (isinstance(zh, list) and len(zh) == len(sentences) and all(isinstance(z, str) for z in zh)
+            and not any(translation_problem(en, z) for en, z in zip(sentences, zh)))
 
 
 def _output_budget(sentences: list) -> int:
@@ -109,16 +137,21 @@ def translate_sentences(sentences: list, paper_map: dict, terms: list, model: st
         tokens += res.tokens
         seconds += res.eval_seconds
         zh = safe_json_parse(_escape_latex_in_json(res.content), {}).get("translations")
-        if isinstance(zh, list) and len(zh) == len(sentences) and all(isinstance(z, str) for z in zh):
+        if isinstance(zh, list) and all(isinstance(z, str) for z in zh):
             zh = [_NUMBER_PREFIX_RE.sub("", z).strip() for z in zh]
+        if _usable(sentences, zh):
             return TranslationResult(zh, True, tokens, seconds)
 
-    # 對齊失敗：整段翻譯，保證至少有譯文
+    # 對齊失敗或輸出失控：整段以純文字翻譯。JSON 字串中反斜線後只能接 " \ / b f n r t u，
+    # 模型寫不出 \lambda 之類的指令，常因此陷入 \text{…} 重複迴圈；純文字模式沒有這個限制。
+    # 仍失控就標示失敗，絕不把原始輸出當譯文。
     whole = [" ".join(sentences)]
-    res = chat(build_translation_prompt(whole, paper_map, terms), model, fmt=_schema(1), num_predict=budget)
-    zh = safe_json_parse(_escape_latex_in_json(res.content), {}).get("translations") or [res.content]
-    zh = _NUMBER_PREFIX_RE.sub("", str(zh[0])).strip()
-    return TranslationResult([zh], False, tokens + res.tokens, seconds + res.eval_seconds)
+    res = chat(build_translation_prompt(whole, paper_map, terms, plain=True), model, num_predict=budget,
+               temperature=0.2)
+    zh = [_NUMBER_PREFIX_RE.sub("", res.content).strip()]
+    if not _usable(whole, zh):
+        zh = [FAILED_TEXT]
+    return TranslationResult(zh, False, tokens + res.tokens, seconds + res.eval_seconds)
 
 
 class TranslationCache:
@@ -152,6 +185,17 @@ def source_hash(items: list) -> str:
     return hashlib.md5("\n".join(items).encode("utf-8")).hexdigest()[:12]
 
 
+def cached_is_valid(sentences: list, cached: dict) -> bool:
+    """快取中的譯文可否沿用；失控輸出與翻譯失敗的區塊都要重翻。"""
+    zh = [_repair_control_chars(z) for z in cached.get("zh") or []]
+    return _usable(sentences if cached.get("aligned") else [" ".join(sentences)], zh) and FAILED_TEXT not in zh
+
+
+def units_are_valid(units: list) -> bool:
+    """已存入 knowledge JSON 的區塊可否沿用；重新開啟文件時，失控或失敗的區塊會重新翻譯。"""
+    return not any(u["zh"] == FAILED_TEXT or translation_problem(u["en"], u["zh"]) for unit in units for u in unit)
+
+
 def translate_block(block: dict, paper_map: dict, glossary: list, cache: TranslationCache,
                     model: str = None) -> bool:
     """翻譯 heading/paragraph/list 區塊，將 items 轉為 units（每個 unit 是一串中英句對）。
@@ -167,6 +211,8 @@ def translate_block(block: dict, paper_map: dict, glossary: list, cache: Transla
 
     key = TranslationCache.key(model, flat, terms)
     cached = cache.get(key)
+    if cached and not cached_is_valid(flat, cached):
+        cached = None  # 舊版沒有檢查失控輸出，這類快取需要重翻
     called = cached is None
     if called:
         result = translate_sentences(flat, paper_map, terms, model)

@@ -7,9 +7,10 @@
 import json
 import os
 import re
+from pathlib import Path
 
 from . import config
-from .llm import call_ai, safe_json_parse, save_json_atomic
+from .llm import call_ai, chat, safe_json_parse, save_json_atomic
 
 
 def _load_json(path, label: str):
@@ -42,8 +43,13 @@ def get_paper_map(full_text: str, output_path) -> dict:
         return cached
 
     print("[文件摘要] 生成 paper_map...")
-    prompt = f"""你是一位專業學術論文分析專家。請閱讀以下論文開頭，提取關鍵資訊並建立 Paper Map。
+    # 書籍章節（名稱帶 _p<頁碼>）的開頭通常沒有書名，檔名是判斷標題與作者的主要線索
+    doc_name = Path(output_path).parent.name
+    prompt = f"""你是一位專業學術論文分析專家。請閱讀以下文件開頭，提取關鍵資訊並建立 Paper Map。
+文件可能是論文，也可能是書籍的其中幾頁；內文沒有標題時，依檔名判斷書名與作者，並在標題後註明章節主題。
 輸出必須是乾淨的 JSON，不要包含 ```json 標籤或任何說明文字。
+
+【檔名】{doc_name}
 
 JSON 格式如下：
 {{
@@ -60,7 +66,7 @@ JSON 格式如下：
 JSON："""
     fallback = {"title": "Unknown", "author": "Unknown", "domain": "Unknown",
                 "topics": [], "summary": "（摘要生成失敗）"}
-    paper_map = safe_json_parse(call_ai(prompt), fallback)
+    paper_map = safe_json_parse(chat(prompt, fmt="json").content, fallback)
     if paper_map is not fallback:
         save_json_atomic(output_path, paper_map)
     return paper_map

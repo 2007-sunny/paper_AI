@@ -42,6 +42,10 @@ def call_ai(prompt: str, model: str = None) -> str:
     return chat(prompt, model).content
 
 
+# JSON 只允許 \" \\ \/ \b \f \n \r \t \uXXXX；其他反斜線（多半是 LaTeX，如 \lambda、\,）補成 \\
+_INVALID_ESCAPE_RE = re.compile(r'(?<!\\)((?:\\\\)*)\\(?!["\\/bfnrtu])')
+
+
 def safe_json_parse(raw_text: str, fallback: dict) -> dict:
     """Safely extracts and parses JSON from raw LLM output."""
     text = raw_text.strip()
@@ -58,8 +62,13 @@ def safe_json_parse(raw_text: str, fallback: dict) -> dict:
             print("    [WARNING] Could not locate valid JSON bounds. Using fallback.")
             return fallback
 
+    text = text[start:end + 1]
     try:
-        return json.loads(text[start:end + 1])
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(_INVALID_ESCAPE_RE.sub(r"\1\\\\", text))
     except json.JSONDecodeError:
         print("    [WARNING] JSON decoding failed. Using fallback.")
         return fallback

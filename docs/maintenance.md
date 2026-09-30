@@ -8,7 +8,7 @@
 |---|---|
 | 路由與 Origin 檢查 | `app.py`（`reject_cross_site_writes`） |
 | 書庫清單、監看資料夾、生字本（SQLite） | `library.py`，資料庫 `output/library.db` |
-| PDF 轉檔（含頁碼範圍命名） | `convert.convert_pdf` |
+| PDF 轉檔（含頁碼範圍命名、文字層損壞時自動 OCR） | `convert.convert_pdf`、`text_layer_is_broken` |
 | 背景排程優先順序 | `session.Worker._next` |
 | 閱讀位置優先 | `DocSession.set_focus`、`_pick` |
 | 翻譯一個區塊並推送 | `DocSession._translate` |
@@ -36,7 +36,8 @@ SSE 事件（`/api/docs/<名稱>/events`）：`block`（id、html）、`progress
 
 - 換模型、thinking、context 長度：`paperai/config.py`（或 `--model`、`--think`）。
 - 翻譯提示詞：`translator.build_translation_prompt`。修改後遞增 `PROMPT_VERSION`，舊快取才會失效。
-- 對齊失敗處理（重試、整段退回）：`translator.translate_sentences`。
+- 對齊失敗處理（重試、整段以純文字退回）：`translator.translate_sentences`。
+- 失控輸出判斷（重複、原始 JSON、說明文字、過長）：`translator.translation_problem`；舊譯文沿用前以 `cached_is_valid`、`units_are_valid` 檢查。
 - 術語比對規則（大小寫、複數、連字號）：`glossary.term_pattern`，翻譯與渲染共用。
 - 錯譯自動改正：`glossary.apply_aliases`（不動公式內容）。
 - Markdown 區塊判斷（例如新增區塊類型）：`blocks.parse_blocks`；可翻譯類型列在 `TRANSLATABLE_TYPES`。
