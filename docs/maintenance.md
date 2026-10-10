@@ -8,6 +8,7 @@
 |---|---|
 | 路由與 Origin 檢查 | `app.py`（`reject_cross_site_writes`） |
 | 書庫清單、監看資料夾、生字本（SQLite） | `library.py`，資料庫 `output/library.db` |
+| 選擇檔案／資料夾對話框（tkinter 子程序，路由 `/api/pick`） | `picker.pick` |
 | PDF 轉檔（含頁碼範圍命名、文字層損壞時自動 OCR） | `convert.convert_pdf`、`text_layer_is_broken` |
 | 背景排程優先順序 | `session.Worker._next` |
 | 閱讀位置優先 | `DocSession.set_focus`、`_pick` |

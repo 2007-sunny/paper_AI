@@ -35,6 +35,8 @@ input[type=text] { padding: 0.45rem 0.6rem; border: 1px solid var(--border); bor
 button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 0.45rem 0.9rem; font: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
 button:hover { background: var(--accent-hover); }
 button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+button.pick-btn { color: var(--accent); border-color: var(--accent); }
+button:disabled { opacity: 0.6; cursor: wait; }
 .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
 .row input.grow { flex: 1; min-width: 220px; }
 .pages { width: 90px; }
@@ -75,18 +77,20 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
 <section class="card">
     <h2>新增 PDF</h2>
     <div class="row">
-        <input type="text" class="grow" id="pdf-path" placeholder="PDF 完整路徑，例如 D:\papers\xxx.pdf（可在檔案總管按右鍵「複製路徑」）">
+        <button class="ghost pick-btn" id="pick-pdf">選擇 PDF…</button>
+        <input type="text" class="grow" id="pdf-path" placeholder="或貼上 PDF 完整路徑，例如 D:\papers\xxx.pdf">
         <input type="text" class="pages" id="pdf-pages" placeholder="頁碼（選填）">
         <button id="convert-btn">轉換</button>
     </div>
-    <p class="hint">PDF 不會被複製，只轉換成 Markdown 存在 output/。頁碼從 0 起算，例如 0-40；大型書籍建議分章轉換，每一章會成為一份獨立文件。</p>
+    <p class="hint">PDF 不會被複製，只轉換成 Markdown 存在 output/。可一次選多個 PDF。頁碼從 0 起算，例如 0-40；大型書籍建議分章轉換，每一章會成為一份獨立文件。</p>
     <p class="error" id="convert-error"></p>
 </section>
 
 <section class="card">
     <h2>監看資料夾</h2>
     <div class="row">
-        <input type="text" class="grow" id="folder-path" placeholder="放 PDF 的資料夾，例如 D:\papers（貼上 PDF 路徑會加入它所在的資料夾）">
+        <button class="ghost pick-btn" id="pick-folder">選擇資料夾…</button>
+        <input type="text" class="grow" id="folder-path" placeholder="或貼上資料夾路徑，例如 D:\papers">
         <button id="folder-btn">加入</button>
     </div>
     <p class="error" id="folder-error"></p>
@@ -181,15 +185,47 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
     }
 
     $('convert-btn').addEventListener('click', () => convert($('pdf-path').value, $('pdf-pages').value));
-    $('folder-btn').addEventListener('click', async () => {
+
+    async function addFolder(path) {
         $('folder-error').textContent = '';
         try {
-            await api('/api/folders', {path: $('folder-path').value.trim().replace(/^"|"$/g, '')});
+            await api('/api/folders', {path: path.trim().replace(/^"|"$/g, '')});
             $('folder-path').value = '';
             refresh();
         } catch (e) {
             $('folder-error').textContent = e.message;
         }
+    }
+    $('folder-btn').addEventListener('click', () => addFolder($('folder-path').value));
+
+    // 由服務在這台電腦上開啟原生對話框；瀏覽器本身拿不到檔案的完整路徑
+    async function pick(kind, button, errorBox) {
+        const label = button.textContent;
+        button.disabled = true;
+        button.textContent = '請在對話框中選擇…';
+        $(errorBox).textContent = '';
+        try {
+            return (await api('/api/pick', {kind})).paths;
+        } catch (e) {
+            $(errorBox).textContent = e.message;
+            return [];
+        } finally {
+            button.disabled = false;
+            button.textContent = label;
+        }
+    }
+    $('pick-pdf').addEventListener('click', async () => {
+        const paths = await pick('pdf', $('pick-pdf'), 'convert-error');
+        if (paths.length === 1) {
+            $('pdf-path').value = paths[0];
+            $('pdf-pages').focus();  // 可以先填頁碼，再按「轉換」
+        } else if (paths.length > 1 && confirm(`要轉換這 ${paths.length} 個 PDF 嗎？（完整轉換，不指定頁碼）`)) {
+            for (const p of paths) await convert(p, '');
+        }
+    });
+    $('pick-folder').addEventListener('click', async () => {
+        const paths = await pick('folder', $('pick-folder'), 'folder-error');
+        if (paths.length) addFolder(paths[0]);
     });
     document.addEventListener('click', async (e) => {
         const conv = e.target.closest('[data-convert]');

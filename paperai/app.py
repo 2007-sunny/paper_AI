@@ -4,6 +4,7 @@
 """
 import asyncio
 import json
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
                                StreamingResponse)
 from pydantic import BaseModel
 
-from . import claude_assist, config, library
+from . import claude_assist, config, library, picker
 from .glossary import upsert_user_term
 from .render import render_markdown
 from .session import Worker
@@ -91,6 +92,23 @@ def add_folder(req: FolderRequest):
 def remove_folder(req: FolderRequest):
     library.remove_folder(req.path)
     return {"ok": True}
+
+
+class PickRequest(BaseModel):
+    kind: str = "pdf"  # pdf | folder
+
+
+@app.post("/api/pick")
+def pick_path(req: PickRequest):
+    """在這台電腦上開啟原生的選擇檔案／資料夾對話框，回傳選到的路徑（取消時為空清單）。"""
+    folders = library.list_folders()
+    try:
+        paths = picker.pick(req.kind, folders[0] if folders else "")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(408, "對話框逾時，請重試")
+    except Exception as e:
+        raise HTTPException(500, f"無法開啟對話框：{e}")
+    return {"paths": paths}
 
 
 class ConvertRequest(BaseModel):
