@@ -30,6 +30,9 @@ def _connect():
             term TEXT NOT NULL, translation TEXT, category TEXT,
             doc TEXT, context TEXT, added_at TEXT);
         CREATE UNIQUE INDEX IF NOT EXISTS vocab_term ON vocab (lower(term));
+        CREATE TABLE IF NOT EXISTS conversions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, pages INTEGER, ocr INTEGER,
+            seconds REAL, finished_at TEXT);
     """)
     # 複習欄位是後來加的，舊資料庫需要補欄位
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(vocab)")}
@@ -37,6 +40,8 @@ def _connect():
                         ("lapses", "INTEGER DEFAULT 0")):
         if column not in columns:
             conn.execute(f"ALTER TABLE vocab ADD COLUMN {column} {ddl}")
+    if "load_seconds" not in {r["name"] for r in conn.execute("PRAGMA table_info(conversions)")}:
+        conn.execute("ALTER TABLE conversions ADD COLUMN load_seconds REAL")
     return conn
 
 
@@ -73,6 +78,52 @@ def record_source(name: str, pdf_path: str, pages: str = None) -> None:
     with _lock, _connect() as conn:
         conn.execute("INSERT OR REPLACE INTO sources VALUES (?, ?, ?, ?)",
                      (name, str(Path(pdf_path).resolve()), pages or "", _now()))
+
+
+# ---------- 轉檔時間估計 ----------
+
+# 轉檔時間分兩段估計：載入辨識模型（沒有進度可回報、與頁數無關）＋逐頁處理。
+# 沒有歷史紀錄時的預設值來自 RTX 4060 Laptop 實測。
+DEFAULT_LOAD_SECONDS = 45
+DEFAULT_SECONDS_PER_PAGE = {False: 3.0, True: 31.0}
+
+
+def record_conversion(name: str, pages: int, ocr: bool, seconds: float, load_seconds: float = None) -> None:
+    with _lock, _connect() as conn:
+        conn.execute("INSERT INTO conversions (name, pages, ocr, seconds, load_seconds, finished_at) "
+                     "VALUES (?, ?, ?, ?, ?, ?)", (name, pages, int(ocr), seconds, load_seconds, _now()))
+
+
+def _median(values: list, default: float) -> float:
+    values = sorted(values)
+    return values[len(values) // 2] if values else default
+
+
+def estimate_load_seconds() -> float:
+    with _lock, _connect() as conn:
+        rows = conn.execute("SELECT load_seconds FROM conversions WHERE load_seconds IS NOT NULL "
+                            "ORDER BY id DESC LIMIT 10").fetchall()
+    return _median([r["load_seconds"] for r in rows], DEFAULT_LOAD_SECONDS)
+
+
+PRIOR_PAGES = 10  # 預設速度視為 10 頁份量的紀錄，避免一兩次異常（例如 GPU 同時在翻譯）讓估計大幅偏掉
+
+
+def estimate_work_seconds(pages: int, ocr: bool) -> float:
+    """逐頁處理時間：同模式最近 10 次紀錄與預設速度的加權平均 × 頁數。"""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT pages, seconds, load_seconds FROM conversions "
+            "WHERE ocr = ? AND pages > 0 AND load_seconds IS NOT NULL ORDER BY id DESC LIMIT 10",
+            (int(ocr),)).fetchall()
+    default = DEFAULT_SECONDS_PER_PAGE[bool(ocr)]
+    work = sum(max(r["seconds"] - r["load_seconds"], 0.0) for r in rows) + default * PRIOR_PAGES
+    per_page = work / (sum(r["pages"] for r in rows) + PRIOR_PAGES)
+    return per_page * max(pages, 1)
+
+
+def estimate_conversion_seconds(pages: int, ocr: bool) -> float:
+    return estimate_load_seconds() + estimate_work_seconds(pages, ocr)
 
 
 def _sources() -> dict:

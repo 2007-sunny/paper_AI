@@ -36,6 +36,19 @@ button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; 
 button:hover { background: var(--accent-hover); }
 button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
 button.pick-btn { color: var(--accent); border-color: var(--accent); }
+.progress-row td { border-top: 0; padding-top: 0; }
+.pinfo { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.3rem; }
+.pline { display: flex; align-items: center; gap: 0.6rem; margin: 0.25rem 0; font-size: 0.85rem; }
+.plabel { width: 7.5rem; flex-shrink: 0; color: var(--text); }
+.ptext { color: var(--muted); white-space: nowrap; }
+.pbar { flex: 1; min-width: 80px; height: 10px; background: var(--border); border-radius: 5px; overflow: hidden; }
+.pbar > span { display: block; height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.8s ease; }
+.pbar.thin { height: 6px; }
+.pbar.thin > span { background: var(--muted); }
+.pbar.late > span, .pbar.indeterminate > span { background: repeating-linear-gradient(45deg, var(--accent), var(--accent) 8px, var(--accent-hover) 8px, var(--accent-hover) 16px); background-size: 200% 100%; animation: pstripes 1.2s linear infinite; }
+.pbar.indeterminate > span { width: 100% !important; opacity: 0.35; }
+@keyframes pstripes { from { background-position: 0 0; } to { background-position: 45px 0; } }
+@media (max-width: 640px) { .pline { flex-wrap: wrap; } .plabel { width: auto; } }
 button:disabled { opacity: 0.6; cursor: wait; }
 .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
 .row input.grow { flex: 1; min-width: 220px; }
@@ -129,14 +142,52 @@ button:disabled { opacity: 0.6; cursor: wait; }
         }).join('');
     }
 
+    function duration(seconds) {
+        seconds = Math.max(0, Math.round(seconds));
+        if (seconds < 60) return `${seconds} 秒`;
+        const minutes = Math.round(seconds / 60);
+        return minutes < 60 ? `${minutes} 分` : `${Math.floor(minutes / 60)} 小時 ${minutes % 60} 分`;
+    }
+
+    function bar(fraction, extraClass = '') {
+        const pct = Math.max(0, Math.min(100, fraction * 100));
+        return `<div class="pbar ${extraClass}"><span style="width:${pct.toFixed(1)}%"></span></div>`;
+    }
+
+    // 整體進度依「過去轉檔的每頁秒數」估計（Marker 載入模型的前 30 秒沒有進度可回報）；
+    // 階段進度直接取自 Marker 的輸出
+    function progressRow(j) {
+        const elapsed = j.elapsed || 0;
+        const estimate = j.estimate || 0;
+        const stage = j.stage;
+        const stageRemain = stage && stage.remaining != null ? stage.remaining : 0;
+        let overall;
+        if (!estimate) {
+            overall = `<span class="plabel">準備中…</span>`;
+        } else {
+            const remain = Math.max(estimate - elapsed, stageRemain);
+            const late = elapsed > estimate;
+            overall = `<span class="plabel">整體</span>${bar(late ? 0.99 : elapsed / estimate, late ? 'late' : '')}` +
+                `<span class="ptext">已用 ${duration(elapsed)}　${late ? '比預估久，仍在進行中' : `預估還要約 ${duration(remain)}`}</span>`;
+        }
+        const stageLine = stage
+            ? `<span class="plabel">${esc(stage.stage)}</span>${bar(stage.done / Math.max(stage.total, 1), 'thin')}` +
+              `<span class="ptext">${stage.done} / ${stage.total}${stage.remaining != null ? `　此階段約剩 ${duration(stage.remaining)}` : ''}</span>`
+            : (estimate ? `<span class="plabel">載入辨識模型…</span>${bar(0, 'thin indeterminate')}<span class="ptext"></span>` : '');
+        const info = j.page_count ? `<div class="pinfo">${j.page_count} 頁${j.ocr ? '・OCR 模式（較慢）' : ''}</div>` : '';
+        return `<tr class="progress-row"><td></td><td colspan="3">${info}
+            <div class="pline">${overall}</div><div class="pline">${stageLine}</div></td></tr>`;
+    }
+
     function renderJobs(jobs) {
         $('jobs-card').hidden = !jobs.length;
         $('jobs').innerHTML = jobs.map((j) => {
             const cls = j.status === '完成' ? 'ok' : j.status === '失敗' ? 'err' : 'warn';
             const name = j.pdf.split(/[\\/]/).pop();
             const link = j.doc ? ` <a href="/read/${encodeURIComponent(j.doc)}/">開啟</a>` : '';
-            return `<tr><td>${esc(j.time)}</td><td>${esc(name)}${j.pages ? `（頁 ${esc(j.pages)}）` : ''}</td>
+            const row = `<tr><td>${esc(j.time)}</td><td>${esc(name)}${j.pages ? `（頁 ${esc(j.pages)}）` : ''}</td>
                 <td><span class="tag ${cls}">${esc(j.status)}</span></td><td class="meta">${esc(j.message)}${link}</td></tr>`;
+            return row + (j.status === '轉換中' ? progressRow(j) : '');
         }).join('');
     }
 

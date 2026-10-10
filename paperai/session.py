@@ -262,8 +262,13 @@ class Worker(threading.Thread):
         return job
 
     def jobs_snapshot(self) -> list:
+        now = time.time()
         with self.cv:
-            return [dict(j) for j in self.jobs]
+            jobs = [dict(j) for j in self.jobs]
+        for j in jobs:
+            if j.get("started"):
+                j["elapsed"] = (j.get("finished") or now) - j["started"]
+        return jobs
 
     def glossary_changed(self, term: str) -> int:
         with self.cv:
@@ -309,14 +314,32 @@ class Worker(threading.Thread):
                     session.on_error(exc)
 
     def _convert(self, job: dict):
-        job["status"] = "轉換中"
+        job.update(status="轉換中", started=time.time(), stage=None, load_seconds=None)
+
+        def on_progress(info: dict):
+            if "pages" in info:  # 開始轉檔：依頁數與模式估計總時間
+                job.update(page_count=info["pages"], ocr=info["ocr"],
+                           estimate=library.estimate_conversion_seconds(info["pages"], info["ocr"]))
+                return
+            if job.get("load_seconds") is None:
+                # 第一次回報進度＝模型載入完成；用實際載入時間重新估計總時間
+                load = time.time() - job["started"]
+                job.update(load_seconds=load,
+                           estimate=load + library.estimate_work_seconds(job.get("page_count", 1), job.get("ocr", False)))
+            job["stage"] = info  # 整個 dict 替換，jobs_snapshot 不會讀到一半的資料
+
         try:
             _unload_ollama_models()  # Marker 與 Ollama 共用 8GB VRAM，先釋放
-            name = convert_pdf(job["pdf"], job["pages"], log=lambda m: job.update(message=m))
+            name = convert_pdf(job["pdf"], job["pages"], log=lambda m: job.update(message=m), progress=on_progress)
             library.record_source(name, job["pdf"], job["pages"])
-            job.update(status="完成", doc=name, message=f"已轉換為 {name}")
+            elapsed = time.time() - job["started"]
+            if job.get("page_count"):
+                library.record_conversion(name, job["page_count"], job.get("ocr", False), elapsed,
+                                          job.get("load_seconds"))
+            job.update(status="完成", doc=name, message=f"已轉換為 {name}（{elapsed / 60:.1f} 分鐘）",
+                       stage=None, finished=time.time())
         except Exception as exc:
-            job.update(status="失敗", message=str(exc))
+            job.update(status="失敗", message=str(exc), stage=None, finished=time.time())
 
 
 def _unload_ollama_models():

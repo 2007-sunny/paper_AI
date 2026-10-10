@@ -56,11 +56,72 @@ def text_layer_is_broken(pdf_path, pages: str = None, sample: int = 30) -> bool:
     return hits >= 5 and hits * 1000 >= len(text.split())
 
 
-def convert_pdf(pdf_path, pages: str = None, log=print, force_ocr: bool = None) -> str:
+def page_count(pdf_path, pages: str = None) -> int:
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(str(pdf_path))
+    try:
+        return len(_page_indices(pages, len(pdf)))
+    finally:
+        pdf.close()
+
+
+# Marker 以 tqdm 輸出各階段進度，例如 "Recognizing Text:  45%|████ | 9/20 [00:03<00:04, 2.9it/s]"
+_TQDM_RE = re.compile(r"^\s*(?P<desc>[^:|\[]{3,60}?):\s*(?P<pct>\d+)%\|[^|]*\|\s*(?P<done>\d+)/(?P<total>\d+)"
+                      r"(?:\s*\[(?P<elapsed>[\d:]+)<(?P<remain>[\d:?]+))?")
+STAGE_LABELS = {
+    "Recognizing Layout": "辨識版面",
+    "Running OCR Error Detection": "檢查文字品質",
+    "Detecting bboxes": "偵測文字位置",
+    "Recognizing Text": "辨識文字",
+    "Recognizing Equations": "辨識公式",
+    "Recognizing tables": "辨識表格",
+    "Recognizing Tables": "辨識表格",
+}
+
+
+def _seconds(clock: str):
+    """tqdm 的 "01:23" 或 "1:02:03" → 秒；"?" 時回傳 None。"""
+    if not clock or "?" in clock:
+        return None
+    total = 0
+    for part in clock.split(":"):
+        total = total * 60 + int(part)
+    return total
+
+
+def _run_marker(command: list, progress) -> tuple:
+    """執行 Marker 並即時解析進度；回傳 (exit code, 最後幾行輸出)。"""
+    from collections import deque
+    tail = deque(maxlen=8)
+    proc = subprocess.Popen(command, env=os.environ.copy(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    buffer = ""
+    while True:
+        chunk = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(4096)
+        if not chunk:
+            break
+        buffer += chunk.decode("utf-8", errors="replace")
+        # tqdm 以 \r 覆寫同一行，所以 \r 與 \n 都當作分隔
+        *lines, buffer = re.split(r"[\r\n]", buffer)
+        for line in lines:
+            if not line.strip():
+                continue
+            m = _TQDM_RE.match(line)
+            if m:
+                desc = m.group("desc").strip()
+                progress({"stage": STAGE_LABELS.get(desc, desc), "done": int(m.group("done")),
+                          "total": int(m.group("total")), "remaining": _seconds(m.group("remain"))})
+            else:
+                tail.append(line.strip())
+    return proc.wait(), "\n".join(list(tail)[-5:])
+
+
+def convert_pdf(pdf_path, pages: str = None, log=print, force_ocr: bool = None, progress=None) -> str:
     """轉換 PDF，回傳文件名稱（output/ 下的資料夾名）。
 
     force_ocr 為 None 時自動判斷：內嵌文字損壞就忽略文字層，整頁重新 OCR。
+    progress(dict) 會收到 {"pages", "ocr"}（開始時）與各階段的 {"stage", "done", "total", "remaining"}。
     """
+    progress = progress or (lambda info: None)
     pdf_path = Path(pdf_path).resolve()
     if not pdf_path.is_file():
         raise FileNotFoundError(f"找不到 PDF：{pdf_path}")
@@ -84,12 +145,11 @@ def convert_pdf(pdf_path, pages: str = None, log=print, force_ocr: bool = None) 
     if force_ocr:
         command.append("--force_ocr")
     log(f"正在轉換：{pdf_path.name}" + (f"（頁 {pages}）" if pages else "") + ("，OCR 模式" if force_ocr else ""))
+    progress({"pages": page_count(pdf_path, pages), "ocr": bool(force_ocr)})
     # 自動選擇裝置；可透過 TORCH_DEVICE 環境變數指定。
-    result = subprocess.run(command, env=os.environ.copy(), capture_output=True, text=True,
-                            encoding="utf-8", errors="replace")
+    returncode, tail = _run_marker(command, progress)
     produced = tmp_root / pdf_path.stem
-    if result.returncode != 0 or not (produced / f"{pdf_path.stem}.md").exists():
-        tail = "\n".join((result.stderr or result.stdout or "").strip().splitlines()[-5:])
+    if returncode != 0 or not (produced / f"{pdf_path.stem}.md").exists():
         shutil.rmtree(tmp_root, ignore_errors=True)
         raise RuntimeError(f"Marker 轉換失敗：{tail}")
 

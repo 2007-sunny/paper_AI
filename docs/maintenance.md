@@ -9,7 +9,8 @@
 | 路由與 Origin 檢查 | `app.py`（`reject_cross_site_writes`） |
 | 書庫清單、監看資料夾、生字本（SQLite） | `library.py`，資料庫 `output/library.db` |
 | 選擇檔案／資料夾對話框（tkinter 子程序，路由 `/api/pick`） | `picker.pick` |
-| PDF 轉檔（含頁碼範圍命名、文字層損壞時自動 OCR） | `convert.convert_pdf`、`text_layer_is_broken` |
+| PDF 轉檔（含頁碼範圍命名、文字層損壞時自動 OCR、進度解析） | `convert.convert_pdf`、`text_layer_is_broken`、`_run_marker`（`STAGE_LABELS`） |
+| 轉檔時間估計 | `library.estimate_conversion_seconds`（`DEFAULT_LOAD_SECONDS`、`DEFAULT_SECONDS_PER_PAGE`、`PRIOR_PAGES`），進度條在 `templates/library.html` 的 `progressRow` |
 | 背景排程優先順序 | `session.Worker._next` |
 | 閱讀位置優先 | `DocSession.set_focus`、`_pick` |
 | 翻譯一個區塊並推送 | `DocSession._translate` |
