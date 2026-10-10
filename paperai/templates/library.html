@@ -159,24 +159,12 @@ button:disabled { opacity: 0.6; cursor: wait; }
     function progressRow(j) {
         const elapsed = j.elapsed || 0;
         const estimate = j.estimate || 0;
-        const stage = j.stage;
-        const stageRemain = stage && stage.remaining != null ? stage.remaining : 0;
-        let overall;
-        if (!estimate) {
-            overall = `<span class="plabel">準備中…</span>`;
-        } else {
-            const remain = Math.max(estimate - elapsed, stageRemain);
-            const late = elapsed > estimate;
-            overall = `<span class="plabel">整體</span>${bar(late ? 0.99 : elapsed / estimate, late ? 'late' : '')}` +
-                `<span class="ptext">已用 ${duration(elapsed)}　${late ? '比預估久，仍在進行中' : `預估還要約 ${duration(remain)}`}</span>`;
-        }
-        const stageLine = stage
-            ? `<span class="plabel">${esc(stage.stage)}</span>${bar(stage.done / Math.max(stage.total, 1), 'thin')}` +
-              `<span class="ptext">${stage.done} / ${stage.total}${stage.remaining != null ? `　此階段約剩 ${duration(stage.remaining)}` : ''}</span>`
-            : (estimate ? `<span class="plabel">載入辨識模型…</span>${bar(0, 'thin indeterminate')}<span class="ptext"></span>` : '');
-        const info = j.page_count ? `<div class="pinfo">${j.page_count} 頁${j.ocr ? '・OCR 模式（較慢）' : ''}</div>` : '';
-        return `<tr class="progress-row"><td></td><td colspan="3">${info}
-            <div class="pline">${overall}</div><div class="pline">${stageLine}</div></td></tr>`;
+        if (!estimate) return '';
+        const stageRemain = j.stage && j.stage.remaining != null ? j.stage.remaining : 0;
+        const late = elapsed > estimate;
+        const text = late ? '快好了…' : `大約還要 ${duration(Math.max(estimate - elapsed, stageRemain))}`;
+        return `<tr class="progress-row"><td></td><td colspan="3"><div class="pline">` +
+            `${bar(late ? 0.97 : elapsed / estimate, late ? 'late' : '')}<span class="ptext">${text}</span></div></td></tr>`;
     }
 
     function renderJobs(jobs) {
