@@ -42,9 +42,13 @@ ollama pull gemma4
 
 ## 使用
 
+雙擊專案資料夾裡的 **`PaperAI.bat`**（可以在桌面建立捷徑，圖示在 `assets/paperai.ico`），或在終端機執行：
+
 ```powershell
 python server.py
 ```
+
+服務已經在執行時，`PaperAI.bat` 只會打開書庫，不會重複啟動。關閉服務的命令列視窗就會停止服務。
 
 瀏覽器會自動開啟書庫 <http://127.0.0.1:8000/>：
 
@@ -112,6 +116,7 @@ python tools/bench_models.py --input "xxx.md" --models gemma4:latest qwen3.5:9b 
 
 | 路徑 | 用途 |
 |---|---|
+| `PaperAI.bat` | 雙擊啟動本機服務並開啟書庫（Windows） |
 | `server.py` | 本機服務入口（書庫、閱讀器、API） |
 | `translate.py` | 命令列翻譯整份文件，輸出靜態 HTML |
 | `pdftomd.py` | 命令列 PDF → Markdown |
