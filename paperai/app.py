@@ -12,7 +12,7 @@ from pathlib import Path
 import ollama
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from . import claude_assist, config, library, picker, rough
@@ -182,6 +182,14 @@ def doc_page(name: str, page: int):
         raise HTTPException(404, "沒有這一頁")
 
 
+@app.get("/api/docs/{name}/pages/{page}/figures/{index}.png")
+def doc_figure(name: str, page: int, index: int):
+    try:
+        return Response(rough.figure_png(str(_pdf(name)), page, index), media_type="image/png")
+    except IndexError:
+        raise HTTPException(404, "沒有這張圖")
+
+
 class TranslateRequest(BaseModel):
     page: int
     block: str
@@ -253,34 +261,34 @@ def _sse(msg: dict) -> str:
     return f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
 
-# ---------- 問 Claude ----------
+# ---------- 擷取內容與問 Claude ----------
+
+class ExtractRequest(BaseModel):
+    pages: list[int]
+    text: str
+
+
+@app.post("/api/docs/{name}/extract")
+def extract_content(name: str, req: ExtractRequest):
+    """選取範圍的原文與 LaTeX 公式，取代截圖；不呼叫任何 API。"""
+    _pdf(name)
+    result = worker.session(name).extract(req.pages[:20], req.text[:50000])
+    return {**result, "html": render_markdown(result["markdown"])}
+
 
 class AskRequest(BaseModel):
     text: str
-    translation: str = ""
-    mode: str = "explain"   # explain | translate
     question: str = ""
-
-
-def _ask_context(name: str) -> dict:
-    session = worker.loaded_session(name)
-    paper_map = (session.paper_map if session else None) or {}
-    return {"title": paper_map.get("title", name), "domain": paper_map.get("domain", "")}
-
-
-@app.post("/api/docs/{name}/prompt")
-def build_prompt(name: str, req: AskRequest):
-    """組出可貼到網頁版 AI 的提示詞（不呼叫任何 API）。"""
-    return {"text": claude_assist.build_prompt(req.mode, req.text[:20000], req.translation[:20000],
-                                               req.question[:2000], _ask_context(name), for_web=True)}
 
 
 @app.post("/api/docs/{name}/ask")
 def ask_claude(name: str, req: AskRequest):
-    """把一段內容交給 Claude 解說；會傳送該段內容到 Anthropic。"""
+    """把擷取的內容交給 Claude 解說；會傳送該段內容到 Anthropic。"""
+    session = worker.session(name)
+    paper_map = session.paper_map or {}
+    context = {"title": paper_map.get("title", name), "domain": paper_map.get("domain", "")}
     try:
-        result = claude_assist.ask(req.mode, req.text[:20000], req.translation[:20000], req.question[:2000],
-                                   None, _ask_context(name))
+        result = claude_assist.ask(req.text[:50000], req.question[:2000], context)
     except claude_assist.ClaudeUnavailable as e:
         raise HTTPException(503, str(e))
     return {"html": render_markdown(result["answer"]), "model": result["model"]}

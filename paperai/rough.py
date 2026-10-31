@@ -15,6 +15,15 @@ from functools import lru_cache
 from . import config, library
 from .glossary import load_user_glossary
 
+FIGURE_GAP = 12           # 點；距離這麼近的圖形視為同一張圖
+FIGURE_MIN_WIDTH = 0.15   # 佔頁寬、頁高的最小比例，過濾分數線與表格線
+FIGURE_MIN_HEIGHT = 0.07
+FIGURE_MAX_AREA = 0.85    # 佔頁面面積的上限
+FIGURE_MAX_TEXT = 0.012   # 每平方點的字元數，超過視為表格或文字框
+FIGURE_LABEL_CHARS = 30   # 圖旁的短文字（座標軸標籤）一併納入
+FIGURE_LABEL_REACH = 24   # 點；標籤最多超出圖框多遠，避免框到頁首
+FIGURE_DPI = 220
+FIGURE_MAX_PIXELS = 3000
 ENDPOINT = "https://translation.googleapis.com/language/translate/v2"
 # 公式字型的文字層常對應到錯誤的 Unicode（Computer Modern 的 ρ ν π）
 _FONT_FIXES = str.maketrans({"⇢": "ρ", "⌫": "ν", "⇡": "π"})
@@ -44,9 +53,12 @@ def _load_key() -> str:
     return key
 
 
+def fix_font(text: str) -> str:
+    return _FF_RE.sub("ff", text).translate(_FONT_FIXES)
+
+
 def _clean(text: str) -> str:
-    text = re.sub(r"-\n(?=[a-z])", "", text).replace("\n", " ")
-    return _FF_RE.sub("ff", text).translate(_FONT_FIXES).strip()
+    return fix_font(re.sub(r"-\n(?=[a-z])", "", text).replace("\n", " ")).strip()
 
 
 def _is_translatable(text: str) -> bool:
@@ -75,7 +87,72 @@ def page_blocks(pdf_path: str, page: int) -> dict:
                 "left": b[0] / width * 100, "top": b[1] / height * 100,
                 "width": (b[2] - b[0]) / width * 100, "height": (b[3] - b[1]) / height * 100,
             })
-        return {"blocks": blocks, "aspect": width / height}
+        figures = [{"left": r.x0 / width * 100, "top": r.y0 / height * 100,
+                    "width": r.width / width * 100, "height": r.height / height * 100}
+                   for r in _figure_rects(target)]
+        return {"blocks": blocks, "figures": figures, "aspect": width / height}
+    finally:
+        pdf.close()
+
+
+def _covered_text(rect, text_blocks: list) -> int:
+    return sum(len(text) for box, text in text_blocks if rect.contains(box))
+
+
+def _merge_rects(rects: list, text_blocks: list) -> list:
+    """把相鄰的矩形併成一張圖（子圖、向量圖的線條群），但不跨過中間的文字段落。"""
+    import fitz
+    merged = []
+    for rect in map(fitz.Rect, rects):
+        changed = True
+        while changed:
+            changed = False
+            for other in merged:
+                union = rect | other
+                near = (rect + (-FIGURE_GAP, -FIGURE_GAP, FIGURE_GAP, FIGURE_GAP)).intersects(other)
+                extra = _covered_text(union, text_blocks) - _covered_text(rect, text_blocks) - _covered_text(other, text_blocks)
+                if near and extra <= FIGURE_LABEL_CHARS:
+                    rect = union
+                    merged.remove(other)
+                    changed = True
+                    break
+        merged.append(rect)
+    return merged
+
+
+def _figure_rects(page) -> list:
+    """頁面上的圖：點陣圖加上向量線條群，再納入座標軸標籤這類短文字。"""
+    import fitz
+    area = page.rect
+    text_blocks = [(fitz.Rect(b[:4]), b[4]) for b in page.get_text("blocks") if b[6] == 0]
+    candidates = [info["bbox"] for info in page.get_image_info()] + list(page.cluster_drawings())
+    figures = []
+    for rect in _merge_rects(candidates, text_blocks):
+        rect &= area
+        size = rect.width * rect.height
+        if rect.width < area.width * FIGURE_MIN_WIDTH or rect.height < area.height * FIGURE_MIN_HEIGHT:
+            continue
+        if size > area.width * area.height * FIGURE_MAX_AREA:  # 掃描書整頁是一張圖
+            continue
+        if sum(len(text) for box, text in text_blocks if box.intersects(rect)) / size > FIGURE_MAX_TEXT:  # 文字框
+            continue
+        reach = rect + (-FIGURE_LABEL_REACH, -FIGURE_LABEL_REACH, FIGURE_LABEL_REACH, FIGURE_LABEL_REACH)
+        for box, text in text_blocks:
+            if len(text) < FIGURE_LABEL_CHARS and reach.contains(box) and (rect + (-8, -8, 8, 8)).intersects(box):
+                rect |= box
+        figures.append(rect)
+    return figures
+
+
+def figure_png(pdf_path: str, page: int, index: int) -> bytes:
+    """從 PDF 重新算圖，比螢幕截圖清楚；放大後過大時降低解析度。"""
+    import fitz
+    pdf = fitz.open(pdf_path)
+    try:
+        target = pdf[page]
+        rect = _figure_rects(target)[index]
+        dpi = min(FIGURE_DPI, int(FIGURE_MAX_PIXELS / max(rect.width, rect.height) * 72))
+        return target.get_pixmap(clip=rect, dpi=dpi).tobytes("png")
     finally:
         pdf.close()
 

@@ -14,13 +14,15 @@ from . import config, library
 from .blocks import TRANSLATABLE_TYPES, parse_blocks
 from .convert import CHUNK_PAGES, OVERLAP_PAGES, ChunkTimeout, MarkerService, chunk_start
 from .llm import save_json_atomic
-from .pages import _block_text, _words, assign_pages
+from .pages import _block_text, _words, assign_pages, word_list
 from .pipeline import build_knowledge, prepare, restore_translations
+from .rough import fix_font
 from .translator import TranslationCache, translate_block
 
 SAVE_INTERVAL = 5.0     # 翻譯中最多每幾秒寫回一次 knowledge JSON
 ERROR_BACKOFF = 30.0    # 模型呼叫失敗後暫停幾秒再試（例如 Ollama 沒開）
 MATCH_PARAGRAPH = 0.7   # PDF 段落的單字出現在 Marker 區塊的比例
+EDGE_WORDS = 8          # 擷取內容時，用選取開頭與結尾各幾個單字定位區塊
 MATCH_BLOCK = 0.4       # Marker 區塊的單字出現在 PDF 段落的比例（跨欄段落只佔一部分）
 
 
@@ -105,6 +107,39 @@ class DocSession:
             if best:
                 return "\n\n".join(" ".join(s["zh"] for s in unit) for unit in best["units"])
         return None
+
+    def _source_text(self, block: dict) -> str:
+        """區塊的原文 Markdown，公式保留 LaTeX；已翻譯的區塊要從 originals 取。"""
+        original = self.originals.get(block["id"], block)
+        if original["type"] == "heading":
+            return "#" * original.get("level", 1) + " " + original["items"][0]
+        if original["type"] == "list":
+            return "\n".join(f"- {item}" for item in original["items"])
+        if "source" in original:
+            return original["source"]
+        return "\n".join(original["items"])
+
+    def extract(self, pages: list, text: str) -> dict:
+        """選取範圍對應的原文，包含夾在中間的獨立公式。waiting 表示這些頁還在解析。
+
+        用選取的開頭與結尾各幾個單字定位，才不會把單字相近的標題或前段一起帶進來。
+        """
+        words = word_list(text)
+        head, tail = set(words[:EDGE_WORDS]), set(words[-EDGE_WORDS:])
+        with self.lock:
+            waiting = not self.whole and any(
+                chunk_start(p) not in self.chunks and chunk_start(p) not in self.skipped for p in pages)
+            blocks = sorted((b for b in self.blocks if b.get("page") in pages), key=lambda b: b["page"])
+            scored = [(i, _words(self._source_text(b))) for i, b in enumerate(blocks) if b["type"] in TRANSLATABLE_TYPES]
+            if not scored or not head:
+                return {"waiting": waiting, "markdown": ""}
+            start_score, start = max((len(head & w), -i) for i, w in scored)
+            end_score, end = max((len(tail & w), i) for i, w in scored)
+            start = -start
+            if start_score * 2 < len(head) or end_score * 2 < len(tail) or end < start:
+                return {"waiting": waiting, "markdown": ""}
+            chosen = [b for b in blocks[start:end + 1] if b["type"] != "image"]
+            return {"waiting": waiting, "markdown": "\n\n".join(fix_font(self._source_text(b)) for b in chosen)}
 
     def set_status(self, text: str):
         self.status = text

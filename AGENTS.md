@@ -4,7 +4,7 @@
 PDF 閱讀器只有一個入口：本機服務 server.py（paperai/app.py + session.py）。
 - 粗翻：PyMuPDF 取每頁文字與座標，使用者按 Ctrl 時才呼叫 Google Cloud Translation（rough.py）。
 - 細翻：Marker 背景轉檔 → 切區塊 → 只在閱讀到該頁時用本機 Ollama 逐句翻譯，完成後依單字重疊取代粗翻。
-模組：config（設定與路徑）、llm（Ollama）、convert（Marker）、blocks（切區塊）、sentences（斷句）、glossary（摘要與術語）、translator（細翻與快取）、pipeline（共用組裝）、rough（粗翻與段落座標）、render（Markdown 轉 HTML）、templates/（單頁前端）、library（SQLite）、session（背景排程）、app（FastAPI 路由）、pages（區塊對應 PDF 頁碼）、claude_assist（問 Claude）。
+模組：config（設定與路徑）、llm（Ollama）、convert（Marker）、blocks（切區塊）、sentences（斷句）、glossary（摘要與術語）、translator（細翻與快取）、pipeline（共用組裝）、rough（粗翻與段落座標）、render（Markdown 轉 HTML）、templates/（單頁前端）、library（SQLite）、session（背景排程）、app（FastAPI 路由）、pages（區塊對應 PDF 頁碼）、claude_assist（直接問 Claude）。
 只有三種情況會把內容傳到外部：按 Ctrl 的段落與查詢的單字傳給 Google，使用者按「直接問 Claude」時呼叫 Anthropic API（模型 claude-opus-5-5）。細翻一律使用本機 Ollama。experiments/ 不參與正式流程。
 
 ## 路徑與設定

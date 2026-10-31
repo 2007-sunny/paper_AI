@@ -8,6 +8,7 @@ Marker 的 Markdown 沒有頁碼，依序使用三種線索：
 """
 import json
 import re
+import unicodedata
 
 _IMAGE_PAGE_RE = re.compile(r"_page_(\d+)_")
 _WORD_RE = re.compile(r"[a-z]{3,}")
@@ -15,10 +16,14 @@ MATCH_THRESHOLD = 0.5   # 區塊單字出現在該頁的比例
 LOOKAHEAD = 4           # 從目前頁往後找幾頁
 
 
+def word_list(text: str) -> list:
+    # 去掉 LaTeX 與 HTML，只比對一般英文單字；ﬁ 等連字在 PDF 文字層和 Marker 的寫法不同
+    text = unicodedata.normalize("NFKC", text.lower())
+    return _WORD_RE.findall(re.sub(r"\$[^$]*\$|<[^>]+>|\\[a-zA-Z]+", " ", text))
+
+
 def _words(text: str) -> set:
-    # 去掉 LaTeX 與 HTML，只比對一般英文單字
-    text = re.sub(r"\$[^$]*\$|<[^>]+>|\\[a-zA-Z]+", " ", text.lower())
-    return set(_WORD_RE.findall(text))
+    return set(word_list(text))
 
 
 def _block_text(block: dict) -> str:

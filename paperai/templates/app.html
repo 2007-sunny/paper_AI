@@ -47,7 +47,7 @@ __CSS__
 
     <div class="selection-menu" id="selection-menu" hidden>
         <button id="menu-lookup">查詢</button>
-        <button id="menu-ask">問 Claude</button>
+        <button id="menu-ask">擷取內容</button>
     </div>
 
     <section class="lookup" id="lookup" hidden>
@@ -62,18 +62,18 @@ __CSS__
 
     <div class="modal-backdrop" id="ask-modal" hidden>
         <div class="modal">
-            <h3>問 Claude</h3>
-            <div class="ask-source" id="ask-source"></div>
+            <h3>擷取內容</h3>
+            <p class="doc-note" id="ask-note"></p>
+            <textarea id="ask-text" rows="9" spellcheck="false"></textarea>
+            <div class="ask-preview" id="ask-preview"></div>
             <div class="row">
-                <button class="tool mode active" data-mode="explain">解說這段</button>
-                <button class="tool mode" data-mode="translate">檢查翻譯</button>
-            </div>
-            <input id="ask-input" placeholder="補充你的問題（選填）" autocomplete="off">
-            <div class="row">
-                <button class="tool primary" id="ask-copy">複製提示詞</button>
+                <button class="tool primary" id="ask-copy">複製</button>
                 <a class="tool" href="https://claude.ai/new" target="_blank" rel="noopener">開啟 Claude.ai ↗</a>
-                <button class="tool" id="ask-api" hidden>直接問 Claude（API）</button>
                 <button class="tool" id="ask-close">關閉</button>
+            </div>
+            <div class="ask-direct" id="ask-direct" hidden>
+                <input id="ask-input" placeholder="想問什麼（選填）" autocomplete="off">
+                <button class="tool" id="ask-api">直接問 Claude</button>
             </div>
             <div class="ask-answer" id="ask-answer"></div>
         </div>

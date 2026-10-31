@@ -439,13 +439,18 @@
 
     // ---------- Ctrl：切換滑鼠所在段落的譯文 ----------
     const mouse = { x: 0, y: 0 };
-    document.addEventListener('mousemove', (e) => { mouse.x = e.clientX; mouse.y = e.clientY; }, { passive: true });
+    document.addEventListener('mousemove', (e) => {
+        mouse.x = e.clientX;
+        mouse.y = e.clientY;
+        updateFigureButton(e.target);
+    }, { passive: true });
 
-    async function pageBlocks(page) {
+    async function pageData(page) {
         const owner = current;
-        if (!owner.blocks[page]) owner.blocks[page] = (await api(`${docApi(owner.name)}/pages/${page}`)).blocks;
+        if (!owner.blocks[page]) owner.blocks[page] = api(`${docApi(owner.name)}/pages/${page}`);
         return owner.blocks[page];
     }
+    async function pageBlocks(page) { return (await pageData(page)).blocks; }
     function holderAtMouse() {
         return [...pagesBox.querySelectorAll('.pdf-page')].find((el) => {
             const r = el.getBoundingClientRect();
@@ -512,6 +517,48 @@
         fillOverlay(el, Number(holder.dataset.page));
     }
 
+    // ---------- 游標移到圖上時顯示「擷取圖片」 ----------
+    const figureBox = document.createElement('div');
+    figureBox.className = 'figure-box';
+    figureBox.innerHTML = '<button class="tool primary" type="button">擷取圖片</button>';
+    const figureButton = figureBox.firstChild;
+    let hoverFigure = null;
+
+    function hideFigure() {
+        hoverFigure = null;
+        figureBox.remove();
+    }
+    async function updateFigureButton(target) {
+        const holder = target.closest?.('.pdf-page');
+        if (!holder || !current?.pages.length) { hideFigure(); return; }
+        const page = Number(holder.dataset.page);
+        const owner = current;
+        const { figures } = await pageData(page).catch(() => ({ figures: [] }));
+        if (current !== owner) return;
+        const r = holder.getBoundingClientRect();
+        const x = (mouse.x - r.left) / r.width * 100, y = (mouse.y - r.top) / r.height * 100;
+        const index = figures.findIndex((f) => x >= f.left && x <= f.left + f.width && y >= f.top && y <= f.top + f.height);
+        if (index < 0) { hideFigure(); return; }
+        if (hoverFigure?.page === page && hoverFigure.index === index) return;
+        hoverFigure = { page, index };
+        const f = figures[index];
+        Object.assign(figureBox.style, { left: `${f.left}%`, top: `${f.top}%`, width: `${f.width}%`, height: `${f.height}%` });
+        holder.querySelector('.overlay-layer').append(figureBox);
+    }
+    figureButton.addEventListener('mousedown', (e) => e.stopPropagation());
+    figureButton.addEventListener('click', async () => {
+        const { page, index } = hoverFigure;
+        const url = `${docApi(current.name)}/pages/${page}/figures/${index}.png`;
+        try {
+            // 直接傳 Promise，瀏覽器才會把等待下載的時間算在這次點擊內
+            await navigator.clipboard.write([new ClipboardItem({ 'image/png': fetch(url).then((r) => r.blob()) })]);
+            notify('已複製圖片，可以貼到 AI');
+        } catch (e) {
+            window.open(url, '_blank');
+            notify('無法直接複製，已在新分頁開啟圖片');
+        }
+    });
+
     // 只有單獨按下再放開 Ctrl 才切換；Ctrl+C、Ctrl+滾輪、Ctrl+點擊都不算
     let ctrlAlone = false;
     document.addEventListener('keydown', (e) => {
@@ -535,8 +582,17 @@
 
     // ---------- 選字：查詢與問 Claude ----------
     const menu = $('selection-menu');
-    let picked = { text: '', context: '', translation: '' };
+    let picked = { text: '', context: '', pages: [] };
 
+    function selectedPages(sel) {
+        const pageOf = (node) => Number((node.nodeType === Node.TEXT_NODE ? node.parentElement : node)
+            ?.closest('.pdf-page')?.dataset.page);
+        const ends = [pageOf(sel.anchorNode), pageOf(sel.focusNode)].filter((p) => !Number.isNaN(p));
+        if (!ends.length) return [];
+        const pages = [];
+        for (let p = Math.min(...ends); p <= Math.max(...ends); p++) pages.push(p);
+        return pages;
+    }
     function cleanTerm(text) {
         return text.replace(/\s+/g, ' ').replace(/^[\s.,;:!?()[\]{}"'「」（），。]+|[\s.,;:!?()[\]{}"'「」（），。]+$/g, '');
     }
@@ -548,8 +604,7 @@
             if (!text || !sel.rangeCount || !viewer.contains(sel.anchorNode)) { menu.hidden = true; return; }
             const rect = sel.getRangeAt(0).getBoundingClientRect();
             const hit = await blockAtPoint(mouse.x, mouse.y).catch(() => null);
-            const overlay = sel.anchorNode.parentElement?.closest('.overlay');
-            picked = { text, context: hit?.block.text?.slice(0, 1000) || '', translation: overlay?.innerText || '' };
+            picked = { text, context: hit?.block.text?.slice(0, 1000) || '', pages: selectedPages(sel) };
             menu.style.left = `${Math.min(rect.left, window.innerWidth - 150)}px`;
             menu.style.top = `${Math.max(rect.top - 38, 8)}px`;
             menu.hidden = false;
@@ -583,33 +638,55 @@
     });
     $('lookup-close').addEventListener('click', () => { lookupId++; $('lookup').hidden = true; });
 
-    let askMode = 'explain';
-    const askBody = () => ({ text: picked.context || picked.text, translation: picked.translation,
-                             mode: askMode, question: $('ask-input').value });
+    // 只選幾個字時擷取整段；公式在 Marker 解析完才有 LaTeX，先給 PDF 文字，解析好再換掉
+    let askTimer = null;
+    async function loadExtract(owner) {
+        const text = picked.text.length < 40 ? (picked.context || picked.text) : picked.text;
+        try {
+            const res = await api(`${docApi(owner)}/extract`, { pages: picked.pages, text });
+            if ($('ask-modal').hidden) return;
+            if (res.markdown) {
+                $('ask-text').value = res.markdown;
+                $('ask-preview').innerHTML = res.html;
+                window.MathJax?.typesetPromise?.([$('ask-preview')]);
+                $('ask-note').textContent = '公式已是 LaTeX，貼到 AI 就能讀。可以直接修改下面的內容。';
+                return;
+            }
+            $('ask-note').textContent = res.waiting ? '這幾頁正在解析，完成後公式會自動換成 LaTeX；目前是 PDF 文字。'
+                : '這段找不到解析結果，目前是 PDF 文字，公式可能失真。';
+            if (res.waiting) askTimer = setTimeout(() => loadExtract(owner), 3000);
+        } catch (e) {
+            $('ask-note').textContent = e.message;
+        }
+    }
     $('menu-ask').addEventListener('click', () => {
         menu.hidden = true;
-        $('ask-source').textContent = picked.context || picked.text;
+        $('ask-text').value = picked.text.length < 40 ? (picked.context || picked.text) : picked.text;
+        $('ask-preview').innerHTML = '';
         $('ask-answer').innerHTML = '';
-        $('ask-input').value = picked.context && picked.text !== picked.context ? `「${picked.text}」是什麼意思？` : '';
-        $('ask-api').hidden = !app.claude_api;
+        $('ask-input').value = '';
+        $('ask-note').textContent = '';
+        $('ask-direct').hidden = !app.claude_api;
         $('ask-modal').hidden = false;
+        loadExtract(current.name);
     });
-    document.querySelectorAll('.mode').forEach((btn) => btn.addEventListener('click', () => {
-        askMode = btn.dataset.mode;
-        document.querySelectorAll('.mode').forEach((b) => b.classList.toggle('active', b === btn));
-    }));
-    $('ask-close').addEventListener('click', () => { $('ask-modal').hidden = true; });
+    $('ask-close').addEventListener('click', () => {
+        clearTimeout(askTimer);
+        $('ask-modal').hidden = true;
+    });
     $('ask-copy').addEventListener('click', async () => {
         try {
-            const { text } = await api(`${docApi(current.name)}/prompt`, askBody());
-            await navigator.clipboard.writeText(text);
-            notify('已複製提示詞');
-        } catch (e) { notify(e.message); }
+            await navigator.clipboard.writeText($('ask-text').value);
+            notify('已複製');
+        } catch (e) {
+            $('ask-text').select();
+            notify('無法自動複製，請按 Ctrl+C');
+        }
     });
     $('ask-api').addEventListener('click', async () => {
         $('ask-answer').textContent = 'Claude 思考中…';
         try {
-            const res = await api(`${docApi(current.name)}/ask`, askBody());
+            const res = await api(`${docApi(current.name)}/ask`, { text: $('ask-text').value, question: $('ask-input').value });
             $('ask-answer').innerHTML = res.html;
             window.MathJax?.typesetPromise?.([$('ask-answer')]);
         } catch (e) {

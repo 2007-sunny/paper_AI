@@ -25,7 +25,9 @@
 | 區塊對應 PDF 頁碼 | `pages.assign_pages` |
 | 表格翻譯 | `translator.translate_table` |
 | 單字查詢 | 路由 `/api/lookup`（Google）、`/api/explain`（本機） |
-| 問 Claude | `claude_assist.build_prompt`（路由 `/prompt`）、`claude_assist.ask`（路由 `/ask`） |
+| 擷取內容 | 路由 `/extract` → `DocSession.extract`（`EDGE_WORDS`）、`_source_text`，字型修正 `rough.fix_font`；前端 `loadExtract` |
+| 自動認圖與擷取 | `rough._figure_rects`、`figure_png`（`FIGURE_*` 參數）；路由 `/pages/<頁>/figures/<序號>.png`；前端 `updateFigureButton` |
+| 直接問 Claude | `claude_assist.ask`（路由 `/ask`） |
 
 SSE 事件（`/api/docs/<名稱>/events`）：`fine`（page）、`progress`（done、total、pending）、`status`（text）。
 
@@ -40,7 +42,7 @@ SSE 事件（`/api/docs/<名稱>/events`）：`fine`（page）、`progress`（do
 | 閱讀位置回報 | `reportPosition` |
 | Ctrl 判定 | `ctrlAlone` 與其 keydown／keyup 監聽 |
 | 譯文覆蓋 | `toggleParagraph`、`fillOverlay`、`fitOverlay`（`MIN_FONT`） |
-| 選字選單、查詢、問 Claude | `selection-menu` 相關監聽 |
+| 選字選單、查詢、擷取內容 | `selection-menu` 相關監聽 |
 
 ## 細翻流程與對應模組
 
