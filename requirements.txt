@@ -4,3 +4,4 @@ markdown-it-py
 fastapi
 pydantic
 uvicorn
+PyMuPDF

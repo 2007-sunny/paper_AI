@@ -1,8 +1,9 @@
-"""PaperAI 本機服務：書庫、閱讀器、即時翻譯、生字本與選字查詢 API。
+"""PaperAI 本機服務：PDF 閱讀器、Ctrl 即時粗翻、本機細翻、單字查詢與問 Claude。
 
 啟動：python server.py（會自動開啟瀏覽器），或 uvicorn server:app --host 127.0.0.1 --port 8000
 """
 import asyncio
+import html
 import json
 import subprocess
 from contextlib import asynccontextmanager
@@ -11,13 +12,11 @@ from pathlib import Path
 import ollama
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
-                               StreamingResponse)
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import claude_assist, config, library, picker
-from .glossary import upsert_user_term
+from . import claude_assist, config, library, picker, rough
+from .convert import _page_indices, normalize_pages
 from .render import render_markdown
 from .session import Worker
 
@@ -33,65 +32,69 @@ async def lifespan(_app):
 
 app = FastAPI(title="PaperAI", lifespan=lifespan)
 
-# 以 file:// 開啟的靜態閱讀器（Origin: null）仍可使用選字查詢
-app.add_middleware(CORSMiddleware, allow_origins=["null"], allow_methods=["POST"], allow_headers=["Content-Type"])
-
 
 @app.middleware("http")
 async def reject_cross_site_writes(request: Request, call_next):
     """服務只綁定本機，但任何網頁都能對 127.0.0.1 發送請求；非本站來源的寫入一律拒絕。"""
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("origin")
-        own = f"http://{request.headers.get('host', '')}"
-        allowed = origin in (None, own) or (origin == "null" and request.url.path == "/api/explain")
-        if not allowed:
+        if origin not in (None, f"http://{request.headers.get('host', '')}"):
             return JSONResponse({"detail": "不允許的來源"}, status_code=403)
     return await call_next(request)
 
 
-def _doc_dir(name: str) -> Path:
-    root = config.OUTPUT_ROOT.resolve()
-    folder = (root / name).resolve()
-    if folder.parent != root or not (folder / f"{name}.md").is_file():
-        raise HTTPException(404, f"找不到文件：{name}")
-    return folder
+def _pdf(name: str) -> Path:
+    pdf = library.source_pdf(name)
+    if not pdf:
+        raise HTTPException(404, f"找不到這份文件的 PDF：{name}")
+    return pdf
 
 
-# ---------- 書庫 ----------
+# ---------- 應用程式狀態 ----------
 
 @app.get("/", response_class=HTMLResponse)
-def library_page():
-    return (TEMPLATE_DIR / "library.html").read_text(encoding="utf-8")
+def index():
+    page = (TEMPLATE_DIR / "app.html").read_text(encoding="utf-8")
+    return (page.replace("__CSS__", (TEMPLATE_DIR / "app.css").read_text(encoding="utf-8"))
+            .replace("__JS__", (TEMPLATE_DIR / "app.js").read_text(encoding="utf-8")))
 
 
-@app.get("/api/library")
-def library_state():
-    docs = library.list_documents()
-    for doc in docs:  # 已開啟的文件用即時進度
-        session = worker.loaded_session(doc["name"])
-        if session:
-            p = session.progress()
-            doc.update(translated=p["done"], total=p["total"])
-    return {"docs": docs, "pdfs": library.list_pdfs(), "folders": library.list_folders(),
-            "jobs": worker.jobs_snapshot(), "model": config.MODEL_NAME}
+@app.get("/api/state")
+def app_state():
+    return {"docs": library.list_documents(), "state": library.load_state(),
+            "usage": library.rough_usage(), "limit": config.ROUGH_MONTHLY_CHARS,
+            "claude_api": claude_assist.api_available(), "model": config.MODEL_NAME}
 
 
-class FolderRequest(BaseModel):
-    path: str
+class StateRequest(BaseModel):
+    last: str | None = None
+    page: int | None = None
+    zoom: float | None = None
 
 
-@app.post("/api/folders")
-def add_folder(req: FolderRequest):
-    try:
-        return {"path": library.add_folder(req.path)}
-    except FileNotFoundError as e:
-        raise HTTPException(400, str(e))
-
-
-@app.post("/api/folders/remove")
-def remove_folder(req: FolderRequest):
-    library.remove_folder(req.path)
+@app.post("/api/state")
+def save_state(req: StateRequest):
+    library.save_state(req.last, req.page, req.zoom)
     return {"ok": True}
+
+
+class WorkspaceRequest(BaseModel):
+    files: list[str]
+    folders: list[str]
+
+
+@app.post("/api/workspace")
+def save_workspace(req: WorkspaceRequest):
+    library.save_workspace(req.files, req.folders)
+    return {"ok": True}
+
+
+@app.get("/api/folder")
+def folder_files(path: str):
+    if not Path(path).is_dir():
+        raise HTTPException(404, f"找不到資料夾：{path}")
+    sources = library.list_sources()
+    return {"pdfs": [{**p, "name": library.doc_name(p["path"], sources)} for p in library.folder_pdfs(path)]}
 
 
 class PickRequest(BaseModel):
@@ -100,67 +103,129 @@ class PickRequest(BaseModel):
 
 @app.post("/api/pick")
 def pick_path(req: PickRequest):
-    """在這台電腦上開啟原生的選擇檔案／資料夾對話框，回傳選到的路徑（取消時為空清單）。"""
-    folders = library.list_folders()
+    """在這台電腦上開啟原生的選擇對話框；瀏覽器本身拿不到檔案的完整路徑。"""
     try:
-        paths = picker.pick(req.kind, folders[0] if folders else "")
+        return {"paths": picker.pick(req.kind, "")}
     except subprocess.TimeoutExpired:
         raise HTTPException(408, "對話框逾時，請重試")
     except Exception as e:
         raise HTTPException(500, f"無法開啟對話框：{e}")
-    return {"paths": paths}
 
 
-class ConvertRequest(BaseModel):
+class AddRequest(BaseModel):
     path: str
-    pages: str = ""
 
 
-@app.post("/api/convert")
-def convert(req: ConvertRequest):
+@app.post("/api/docs")
+def add_document(req: AddRequest):
+    """加入 PDF：只記錄路徑，立即可讀可粗翻；閱讀到哪裡才分段轉檔與細翻。"""
     path = Path(req.path.strip().strip('"'))
     if not path.is_file() or path.suffix.lower() != ".pdf":
         raise HTTPException(400, f"找不到 PDF：{req.path}")
-    return worker.submit_convert(str(path.resolve()), req.pages.strip())
+    path = path.resolve()
+    name = library.doc_name(path)
+    library.record_source(name, str(path))
+    return {"name": name}
 
 
-# ---------- 閱讀器 ----------
+# ---------- 文件 ----------
 
-@app.get("/read/{name}")
-def read_redirect(name: str):
-    # 需要結尾斜線，圖片等相對路徑才會解析到 /read/<name>/ 底下
-    return RedirectResponse(f"/read/{name}/")
-
-
-@app.get("/read/{name}/", response_class=HTMLResponse)
-def read_page(name: str):
-    _doc_dir(name)
-    return worker.session(name).page_html()
+def _known_doc(name: str) -> None:
+    if not any(d["name"] == name for d in library.list_documents()):
+        raise HTTPException(404, f"找不到文件：{name}")
 
 
-@app.get("/read/{name}/source.pdf")
+@app.get("/api/docs/{name}/storage")
+def doc_storage(name: str):
+    _known_doc(name)
+    return library.document_storage(name)
+
+
+@app.delete("/api/docs/{name}")
+def delete_document(name: str):
+    """永久刪除 output/<名稱>/ 的翻譯資料與書庫紀錄；不會刪除原始 PDF。"""
+    _known_doc(name)
+    if not worker.close_document(name):
+        raise HTTPException(409, "這份文件正在處理中，請稍候再刪除")
+    try:
+        library.delete_document(name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except OSError as e:
+        raise HTTPException(500, f"部分檔案無法刪除：{e}")
+    return {"ok": True}
+
+
+@app.get("/api/docs/{name}/info")
+def doc_info(name: str):
+    import fitz
+    pdf = fitz.open(_pdf(name))
+    try:
+        total = len(pdf)
+    finally:
+        pdf.close()
+    pages = next((d["pages"] for d in library.list_documents() if d["name"] == name), "")
+    return {"name": name, "pages": _page_indices(normalize_pages(pages), total)}
+
+
+@app.get("/api/docs/{name}/source.pdf")
 def doc_pdf(name: str):
-    """原版面檢視用的原始 PDF；只提供書庫記錄的那個檔案（支援 Range，大型書籍可分段載入）。"""
-    _doc_dir(name)
-    pdf = library.source_pdf(name)
-    if not pdf:
-        raise HTTPException(404, "找不到這份文件的原始 PDF")
-    return FileResponse(pdf, media_type="application/pdf")
+    """只提供書庫記錄的那個檔案（支援 Range，大型書籍可分段載入）。"""
+    return FileResponse(_pdf(name), media_type="application/pdf")
 
 
-@app.get("/read/{name}/{file_path:path}")
-def doc_file(name: str, file_path: str):
-    folder = _doc_dir(name)
-    target = (folder / file_path).resolve()
-    if folder not in target.parents or not target.is_file() or target.suffix.lower() not in (
-            ".jpeg", ".jpg", ".png", ".gif", ".svg", ".webp"):
-        raise HTTPException(404)
-    return FileResponse(target)
+@app.get("/api/docs/{name}/pages/{page}")
+def doc_page(name: str, page: int):
+    try:
+        return rough.page_blocks(str(_pdf(name)), page)
+    except IndexError:
+        raise HTTPException(404, "沒有這一頁")
+
+
+class TranslateRequest(BaseModel):
+    page: int
+    block: str
+
+
+def _block_text(name: str, page: int, block_id: str) -> str:
+    blocks = rough.page_blocks(str(_pdf(name)), page)["blocks"]
+    block = next((b for b in blocks if b["id"] == block_id), None)
+    if block is None:
+        raise HTTPException(404, "找不到這個段落")
+    return block["text"]
+
+
+@app.post("/api/docs/{name}/translate")
+def translate_paragraph(name: str, req: TranslateRequest):
+    """按下 Ctrl 時呼叫：有細翻就用細翻，否則即時粗翻。"""
+    text = _block_text(name, req.page, req.block)
+    fine = worker.session(name).fine_translation(req.page, text)
+    if fine:
+        return {"html": render_markdown(fine), "source": "fine"}
+    try:
+        return {"html": f"<p>{html.escape(rough.translate(text))}</p>", "source": "rough"}
+    except rough.QuotaExceeded as e:
+        raise HTTPException(429, str(e))
+    except rough.RoughUnavailable as e:
+        raise HTTPException(503, str(e))
+
+
+class FocusRequest(BaseModel):
+    page: int
+
+
+@app.post("/api/docs/{name}/focus")
+def doc_focus(name: str, req: FocusRequest):
+    """閱讀位置改變：細翻只處理目前頁和下一頁。"""
+    _pdf(name)
+    worker.session(name).set_focus([req.page, req.page + 1])
+    worker.notify()
+    return {"ok": True}
 
 
 @app.get("/api/docs/{name}/events")
 async def doc_events(name: str, request: Request):
-    _doc_dir(name)
+    _pdf(name)
     session = await run_in_threadpool(worker.session, name)
     queue = asyncio.Queue()
     session.subscribe(asyncio.get_running_loop(), queue)
@@ -188,170 +253,98 @@ def _sse(msg: dict) -> str:
     return f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
 
-class FocusRequest(BaseModel):
-    visible: list[str]
-
-
-@app.post("/api/docs/{name}/focus")
-def doc_focus(name: str, req: FocusRequest):
-    session = worker.loaded_session(name)
-    if session:
-        session.set_focus(req.visible[:50])
-        worker.notify()
-    return {"ok": True}
-
+# ---------- 問 Claude ----------
 
 class AskRequest(BaseModel):
-    block: str
-    mode: str = "explain"   # explain | translate | figure
+    text: str
+    translation: str = ""
+    mode: str = "explain"   # explain | translate
     question: str = ""
+
+
+def _ask_context(name: str) -> dict:
+    session = worker.loaded_session(name)
+    paper_map = (session.paper_map if session else None) or {}
+    return {"title": paper_map.get("title", name), "domain": paper_map.get("domain", "")}
 
 
 @app.post("/api/docs/{name}/prompt")
 def build_prompt(name: str, req: AskRequest):
-    """組出可貼到網頁版 AI 的提示詞（不呼叫任何 API）；圖片區塊另外回傳圖片檔名供前端複製。"""
-    _doc_dir(name)
-    try:
-        material = worker.session(name).block_material(req.block)
-    except KeyError:
-        raise HTTPException(404, "找不到這個區塊")
-    mode = "figure" if material["type"] == "image" else req.mode
-    text = claude_assist.build_prompt(mode, material["text"] if mode != "figure" else "", material["translation"],
-                                      req.question[:2000], material["context"], for_web=True)
-    image = material["image"].name if material["image"] and mode == "figure" else None
-    return {"text": text, "image": image}
+    """組出可貼到網頁版 AI 的提示詞（不呼叫任何 API）。"""
+    return {"text": claude_assist.build_prompt(req.mode, req.text[:20000], req.translation[:20000],
+                                               req.question[:2000], _ask_context(name), for_web=True)}
 
 
 @app.post("/api/docs/{name}/ask")
 def ask_claude(name: str, req: AskRequest):
-    """把一個區塊（段落、表格或圖片）交給 Claude 解說；會傳送該區塊內容到 Anthropic。"""
-    _doc_dir(name)
-    session = worker.session(name)
+    """把一段內容交給 Claude 解說；會傳送該段內容到 Anthropic。"""
     try:
-        material = session.block_material(req.block)
-    except KeyError:
-        raise HTTPException(404, "找不到這個區塊")
-    mode = "figure" if material["type"] == "image" else req.mode
-    try:
-        result = claude_assist.ask(mode, material["text"] if mode != "figure" else "",
-                                   material["translation"], req.question[:2000],
-                                   material["image"] if mode == "figure" else None, material["context"])
+        result = claude_assist.ask(req.mode, req.text[:20000], req.translation[:20000], req.question[:2000],
+                                   None, _ask_context(name))
     except claude_assist.ClaudeUnavailable as e:
         raise HTTPException(503, str(e))
     return {"html": render_markdown(result["answer"]), "model": result["model"]}
 
 
-# ---------- 術語與生字本 ----------
+# ---------- 單字查詢 ----------
 
-class GlossaryRequest(BaseModel):
+class LookupRequest(BaseModel):
     term: str
-    translation: str
-    old_translation: str = ""
-    category: str = "general"
 
 
-@app.post("/api/glossary")
-def update_glossary(req: GlossaryRequest):
+@app.post("/api/lookup")
+def lookup_word(req: LookupRequest):
+    """Google 即時譯名；語境解釋隨後由 /api/explain 的本機模型補上。"""
     try:
-        entry = upsert_user_term(req.term, req.translation, req.old_translation, req.category)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {"entry": entry, "retranslating": worker.glossary_changed(req.term)}
+        return {"translation": rough.translate(req.term.strip()[:200])}
+    except rough.QuotaExceeded as e:
+        raise HTTPException(429, str(e))
+    except rough.RoughUnavailable as e:
+        raise HTTPException(503, str(e))
 
-
-class VocabRequest(BaseModel):
-    term: str
-    translation: str = ""
-    category: str = ""
-    doc: str = ""
-    context: str = ""
-
-
-@app.get("/api/vocab")
-def get_vocab():
-    return library.list_vocab()
-
-
-@app.post("/api/vocab")
-def add_vocab(req: VocabRequest):
-    return {"added": library.add_vocab(req.term, req.translation, req.category, req.doc, req.context)}
-
-
-@app.delete("/api/vocab/{vocab_id}")
-def delete_vocab(vocab_id: int):
-    library.delete_vocab(vocab_id)
-    return {"ok": True}
-
-
-@app.get("/review", response_class=HTMLResponse)
-def review_page():
-    return (TEMPLATE_DIR / "review.html").read_text(encoding="utf-8")
-
-
-@app.get("/api/vocab/due")
-def vocab_due(limit: int = 30):
-    return library.due_vocab(max(1, min(limit, 200)))
-
-
-class ReviewRequest(BaseModel):
-    remembered: bool
-
-
-@app.post("/api/vocab/{vocab_id}/review")
-def review_vocab(vocab_id: int, req: ReviewRequest):
-    try:
-        return library.review_vocab(vocab_id, req.remembered)
-    except KeyError:
-        raise HTTPException(404, "找不到這個生字")
-
-
-@app.get("/api/vocab/export.tsv")
-def export_vocab():
-    return PlainTextResponse(library.export_anki_tsv(), media_type="text/tab-separated-values; charset=utf-8",
-                             headers={"Content-Disposition": "attachment; filename=paperai_vocab_anki.txt"})
-
-
-# ---------- 選字查詢 ----------
 
 class ExplainRequest(BaseModel):
     term: str
     context: str | None = None
-    model_name: str | None = None
 
 
 EXPLAIN_PROMPT = (
     "You are an expert bilingual scientific paper reading assistant. "
-    "Translate and explain the requested term based on the provided context, "
+    "Explain the requested term based on the provided context, "
     "and provide 1-2 high-quality academic example sentences using this term. "
     "Use Traditional Chinese as used in Taiwan.\n\n"
     "Respond ONLY with a raw JSON object matching this schema:\n"
-    '{"translation": "繁體中文翻譯", "explanation": "針對該詞彙在學術上下文中的簡短中文解釋", '
-    '"category": "術語類別（例如 tech, math, physics, general）", '
+    '{"translation": "在此語境下的繁體中文譯名", "explanation": "針對該詞彙在學術上下文中的簡短中文解釋", '
     '"sentences": [{"en": "Example sentence.", "zh": "對應的繁體中文翻譯"}]}'
 )
 
 
+EXPLAIN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "translation": {"type": "string"},
+        "explanation": {"type": "string"},
+        "sentences": {"type": "array", "maxItems": 2, "items": {
+            "type": "object", "properties": {"en": {"type": "string"}, "zh": {"type": "string"}},
+            "required": ["en", "zh"]}},
+    },
+    "required": ["translation", "explanation", "sentences"],
+}
+
+
 @app.post("/api/explain")
 def explain_word(payload: ExplainRequest):
-    active_model = payload.model_name or config.MODEL_NAME
     user_content = f"Term: {payload.term}\n" + (f"Context: {payload.context}" if payload.context else "")
     try:
         response = ollama.chat(
-            model=active_model,
+            model=config.MODEL_NAME,
             messages=[{"role": "system", "content": EXPLAIN_PROMPT}, {"role": "user", "content": user_content}],
-            format="json",
+            format=EXPLAIN_SCHEMA,
             think=False,  # 思考型模型關閉 thinking，查詢才會即時回應
-            options={"temperature": 0.3},
+            options={"temperature": 0.3, "num_predict": 500},  # 沒有上限時 JSON 模式可能停不下來
         )
         result = json.loads(response["message"]["content"].strip())
-        return {
-            "term": payload.term,
-            "translation": result.get("translation", "翻譯失敗"),
-            "explanation": result.get("explanation", "無法提供解釋"),
-            "category": result.get("category", "custom"),
-            "sentences": result.get("sentences", []),
-            "model_used": active_model,
-        }
+        return {"translation": result.get("translation", ""), "explanation": result.get("explanation", ""),
+                "sentences": result.get("sentences", [])}
     except Exception as e:
-        return {"term": payload.term, "translation": "錯誤", "explanation": f"呼叫本機 AI 時發生錯誤：{e}",
-                "category": "error", "sentences": [], "model_used": active_model}
+        raise HTTPException(503, f"呼叫本機模型時發生錯誤：{e}")

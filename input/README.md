@@ -1,1 +1,1 @@
-將 PDF 放在此資料夾，並修改 pdftomd.py 的 INPUT_FILENAME。本機 PDF 不會提交到 Git。
+這個資料夾是選用的舊 PDF 存放位置，本機 PDF 不會提交 Git。一般請在閱讀器按「＋ 加入」選擇任意位置的 PDF。

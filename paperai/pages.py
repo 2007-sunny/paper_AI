@@ -75,9 +75,9 @@ def _pdf_page_words(pdf_path, pages: list) -> dict:
         pdf.close()
 
 
-def assign_pages(blocks: list, meta_path, pdf_path=None) -> list:
-    """回傳文件涵蓋的頁碼清單，並在每個區塊寫入 block["page"]。"""
-    pages = _page_range(meta_path, blocks)
+def assign_pages(blocks: list, meta_path, pdf_path=None, pages: list = None) -> list:
+    """回傳文件涵蓋的頁碼清單，並在每個區塊寫入 block["page"]；分段轉檔時由 pages 指定範圍。"""
+    pages = pages or _page_range(meta_path, blocks)
     toc = _toc_entries(meta_path)
     page_words = {}
     if pdf_path:

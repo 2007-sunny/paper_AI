@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PaperAI</title>
+    <script>
+        window.MathJax = {
+            tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true },
+            options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+        };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+    <style>
+__CSS__
+    </style>
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="side-tabs">
+            <button class="side-tab active" data-side="files">檔案</button>
+            <button class="side-tab" data-side="history">歷史</button>
+        </div>
+        <div class="side-actions" id="file-actions">
+            <button class="tool" id="open-file">開啟檔案</button>
+            <button class="tool" id="open-folder">開啟資料夾</button>
+        </div>
+        <nav class="doc-list" id="doc-list"></nav>
+        <div class="side-foot" id="usage"></div>
+    </aside>
+
+    <main class="main">
+        <header class="toolbar">
+            <button class="tool" id="toggle-sidebar" title="收合側邊欄">☰</button>
+            <span class="doc-title" id="doc-title"></span>
+            <span class="status" id="status"></span>
+            <span class="pager"><input id="page-input" inputmode="numeric" aria-label="頁碼"> / <span id="page-total">—</span></span>
+            <button class="tool" id="zoom-out" title="縮小">−</button>
+            <button class="tool" id="zoom-label" title="符合寬度">100%</button>
+            <button class="tool" id="zoom-in" title="放大">＋</button>
+        </header>
+        <div class="viewer" id="viewer">
+            <p class="empty" id="empty">從左側加入或選擇一份 PDF。</p>
+            <div class="pages" id="pages"></div>
+        </div>
+    </main>
+
+    <div class="selection-menu" id="selection-menu" hidden>
+        <button id="menu-lookup">查詢</button>
+        <button id="menu-ask">問 Claude</button>
+    </div>
+
+    <section class="lookup" id="lookup" hidden>
+        <div class="lookup-head">
+            <strong id="lookup-term"></strong>
+            <button class="tool" id="lookup-close" aria-label="關閉">×</button>
+        </div>
+        <p class="lookup-zh" id="lookup-zh"></p>
+        <p class="lookup-more" id="lookup-more"></p>
+        <ul class="lookup-sentences" id="lookup-sentences"></ul>
+    </section>
+
+    <div class="modal-backdrop" id="ask-modal" hidden>
+        <div class="modal">
+            <h3>問 Claude</h3>
+            <div class="ask-source" id="ask-source"></div>
+            <div class="row">
+                <button class="tool mode active" data-mode="explain">解說這段</button>
+                <button class="tool mode" data-mode="translate">檢查翻譯</button>
+            </div>
+            <input id="ask-input" placeholder="補充你的問題（選填）" autocomplete="off">
+            <div class="row">
+                <button class="tool primary" id="ask-copy">複製提示詞</button>
+                <a class="tool" href="https://claude.ai/new" target="_blank" rel="noopener">開啟 Claude.ai ↗</a>
+                <button class="tool" id="ask-api" hidden>直接問 Claude（API）</button>
+                <button class="tool" id="ask-close">關閉</button>
+            </div>
+            <div class="ask-answer" id="ask-answer"></div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="delete-modal" hidden>
+        <div class="modal delete-modal">
+            <section id="delete-step-1">
+                <h3>要刪除這份文件的翻譯嗎？</h3>
+                <div class="delete-preview">
+                    <canvas id="delete-canvas"></canvas>
+                    <p class="doc-note" id="delete-no-pdf" hidden>找不到原始 PDF，無法預覽。</p>
+                </div>
+                <p class="delete-title" id="delete-title"></p>
+            </section>
+            <section id="delete-step-2" hidden>
+                <h3>確認永久刪除翻譯檔案</h3>
+                <p>將永久刪除「<span id="delete-name"></span>」的轉檔結果、譯文與術語（<span id="delete-size"></span>），無法復原。</p>
+                <p><strong>原始 PDF 不會被刪除。</strong>之後重新開啟時需要再轉檔與細翻。</p>
+            </section>
+            <div class="row">
+                <button class="tool" id="delete-next">下一步</button>
+                <button class="tool danger" id="delete-confirm" hidden>確認永久刪除</button>
+                <button class="tool" id="delete-cancel">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="notice" id="notice" hidden></div>
+
+    <script>
+__JS__
+    </script>
+</body>
+</html>

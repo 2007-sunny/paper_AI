@@ -1,6 +1,6 @@
 """比較 Ollama 模型的翻譯速度、對齊成功率與品質。
 
-從文件挑幾個內文段落，用與 translate.py 相同的逐句翻譯流程（translate_sentences），
+從文件挑幾個內文段落，用與正式細翻相同的逐句翻譯流程（translate_sentences），
 輸出速度統計與並排對照報告（output/<名稱>/bench/）。不讀寫翻譯快取。
 
 範例：

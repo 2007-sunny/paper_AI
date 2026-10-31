@@ -25,7 +25,7 @@ def main():
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     print(f"PaperAI 已啟動：{url}（Ctrl+C 結束）")
-    # 只綁定本機；靜態閱讀器的選字查詢預設連 port 8000
+    # 只綁定本機
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 

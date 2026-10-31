@@ -1,4 +1,4 @@
-"""CLI（translate.py）與本機服務共用的流程組裝。"""
+"""本機服務的細翻流程組裝。"""
 import json
 import os
 from datetime import datetime

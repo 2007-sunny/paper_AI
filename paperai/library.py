@@ -1,9 +1,11 @@
-"""書庫：監看資料夾、PDF 來源紀錄與生字本，存在 output/library.db（SQLite）。
+"""書庫：PDF 來源紀錄、閱讀狀態與粗翻快取，存在 output/library.db（SQLite）。
 
-PDF 不需要複製到專案內；書庫只記錄路徑，並掃描使用者指定的資料夾。
+PDF 不需要複製到專案內；書庫只記錄路徑。
 """
+import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import threading
 from datetime import datetime
@@ -12,8 +14,7 @@ from pathlib import Path
 from . import config
 
 DB_PATH = config.OUTPUT_ROOT / "library.db"
-MAX_PDFS = 2000  # 單次掃描上限，避免誤加整顆硬碟時卡住
-
+MAX_PDFS = 2000  # 單次掃描上限，避免開到整顆硬碟時卡住
 _lock = threading.Lock()
 
 
@@ -22,26 +23,12 @@ def _connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript("""
-        CREATE TABLE IF NOT EXISTS folders (path TEXT PRIMARY KEY, added_at TEXT);
         CREATE TABLE IF NOT EXISTS sources (
             name TEXT PRIMARY KEY, pdf_path TEXT, pages TEXT, added_at TEXT);
-        CREATE TABLE IF NOT EXISTS vocab (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            term TEXT NOT NULL, translation TEXT, category TEXT,
-            doc TEXT, context TEXT, added_at TEXT);
-        CREATE UNIQUE INDEX IF NOT EXISTS vocab_term ON vocab (lower(term));
-        CREATE TABLE IF NOT EXISTS conversions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, pages INTEGER, ocr INTEGER,
-            seconds REAL, finished_at TEXT);
+        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS rough_cache (hash TEXT PRIMARY KEY, zh TEXT);
+        CREATE TABLE IF NOT EXISTS rough_usage (month TEXT PRIMARY KEY, chars INTEGER);
     """)
-    # 複習欄位是後來加的，舊資料庫需要補欄位
-    columns = {r["name"] for r in conn.execute("PRAGMA table_info(vocab)")}
-    for column, ddl in (("box", "INTEGER DEFAULT 0"), ("due", "TEXT"), ("reviews", "INTEGER DEFAULT 0"),
-                        ("lapses", "INTEGER DEFAULT 0")):
-        if column not in columns:
-            conn.execute(f"ALTER TABLE vocab ADD COLUMN {column} {ddl}")
-    if "load_seconds" not in {r["name"] for r in conn.execute("PRAGMA table_info(conversions)")}:
-        conn.execute("ALTER TABLE conversions ADD COLUMN load_seconds REAL")
     return conn
 
 
@@ -49,29 +36,82 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-# ---------- 監看資料夾 ----------
+# ---------- 閱讀狀態與粗翻 ----------
 
-def list_folders() -> list:
+def load_state() -> dict:
     with _lock, _connect() as conn:
-        return [r["path"] for r in conn.execute("SELECT path FROM folders ORDER BY added_at")]
+        row = conn.execute("SELECT value FROM settings WHERE key = 'state'").fetchone()
+    state = json.loads(row["value"]) if row else {"last": "", "positions": {}, "zoom": 1.0}
+    state.setdefault("files", [state["last"]] if state["last"] else [])  # 側邊欄開著的檔案
+    state.setdefault("folders", [])
+    return state
 
 
-def add_folder(path: str) -> str:
-    """加入監看資料夾；貼上的是 PDF 檔案路徑時，改為加入它所在的資料夾。"""
-    path = path.strip().strip('"').strip()
-    folder = Path(path).expanduser().resolve()
-    if folder.is_file() and folder.suffix.lower() == ".pdf":
-        folder = folder.parent
-    if not folder.is_dir():
-        raise FileNotFoundError(f"找不到資料夾：{path}")
+def _write_state(state: dict) -> None:
     with _lock, _connect() as conn:
-        conn.execute("INSERT OR IGNORE INTO folders VALUES (?, ?)", (str(folder), _now()))
-    return str(folder)
+        conn.execute("INSERT OR REPLACE INTO settings VALUES ('state', ?)", (json.dumps(state, ensure_ascii=False),))
 
 
-def remove_folder(path: str) -> None:
+def save_state(last: str = None, page: int = None, zoom: float = None) -> None:
+    state = load_state()
+    if last is not None:
+        state["last"] = last
+        if page is not None:
+            state["positions"][last] = page
+    if zoom is not None:
+        state["zoom"] = zoom
+    _write_state(state)
+
+
+def save_workspace(files: list, folders: list) -> None:
+    state = load_state()
+    state.update(files=files, folders=folders)
+    _write_state(state)
+
+
+def folder_pdfs(folder: str) -> list:
+    pdfs = []
+    for root, dirs, names in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]  # 略過 .obsidian、.git 等隱藏資料夾
+        for fn in names:
+            if fn.lower().endswith(".pdf"):
+                path = Path(root) / fn
+                pdfs.append({"path": str(path), "label": str(path.relative_to(folder))})
+                if len(pdfs) >= MAX_PDFS:
+                    return pdfs
+    return sorted(pdfs, key=lambda p: p["label"].lower())
+
+
+def rough_cached(key: str):
     with _lock, _connect() as conn:
-        conn.execute("DELETE FROM folders WHERE path = ?", (path,))
+        row = conn.execute("SELECT zh FROM rough_cache WHERE hash = ?", (key,)).fetchone()
+    return row["zh"] if row else None
+
+
+def rough_store(key: str, zh: str) -> None:
+    with _lock, _connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO rough_cache VALUES (?, ?)", (key, zh))
+
+
+def rough_usage() -> int:
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT chars FROM rough_usage WHERE month = ?", (_month(),)).fetchone()
+    return row["chars"] if row else 0
+
+
+def reserve_chars(count: int, limit: int) -> bool:
+    """送出前先記帳；超過上限時不記帳並回傳 False。"""
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT chars FROM rough_usage WHERE month = ?", (_month(),)).fetchone()
+        used = row["chars"] if row else 0
+        if used + count > limit:
+            return False
+        conn.execute("INSERT OR REPLACE INTO rough_usage VALUES (?, ?)", (_month(), used + count))
+    return True
+
+
+def _month() -> str:
+    return datetime.now().strftime("%Y-%m")
 
 
 def record_source(name: str, pdf_path: str, pages: str = None) -> None:
@@ -80,55 +120,26 @@ def record_source(name: str, pdf_path: str, pages: str = None) -> None:
                      (name, str(Path(pdf_path).resolve()), pages or "", _now()))
 
 
-# ---------- 轉檔時間估計 ----------
-
-# 轉檔時間分兩段估計：載入辨識模型（沒有進度可回報、與頁數無關）＋逐頁處理。
-# 沒有歷史紀錄時的預設值來自 RTX 4060 Laptop 實測。
-DEFAULT_LOAD_SECONDS = 45
-DEFAULT_SECONDS_PER_PAGE = {False: 3.0, True: 31.0}
-
-
-def record_conversion(name: str, pages: int, ocr: bool, seconds: float, load_seconds: float = None) -> None:
-    with _lock, _connect() as conn:
-        conn.execute("INSERT INTO conversions (name, pages, ocr, seconds, load_seconds, finished_at) "
-                     "VALUES (?, ?, ?, ?, ?, ?)", (name, pages, int(ocr), seconds, load_seconds, _now()))
-
-
-def _median(values: list, default: float) -> float:
-    values = sorted(values)
-    return values[len(values) // 2] if values else default
-
-
-def estimate_load_seconds() -> float:
-    with _lock, _connect() as conn:
-        rows = conn.execute("SELECT load_seconds FROM conversions WHERE load_seconds IS NOT NULL "
-                            "ORDER BY id DESC LIMIT 10").fetchall()
-    return _median([r["load_seconds"] for r in rows], DEFAULT_LOAD_SECONDS)
-
-
-PRIOR_PAGES = 10  # 預設速度視為 10 頁份量的紀錄，避免一兩次異常（例如 GPU 同時在翻譯）讓估計大幅偏掉
-
-
-def estimate_work_seconds(pages: int, ocr: bool) -> float:
-    """逐頁處理時間：同模式最近 10 次紀錄與預設速度的加權平均 × 頁數。"""
-    with _lock, _connect() as conn:
-        rows = conn.execute(
-            "SELECT pages, seconds, load_seconds FROM conversions "
-            "WHERE ocr = ? AND pages > 0 AND load_seconds IS NOT NULL ORDER BY id DESC LIMIT 10",
-            (int(ocr),)).fetchall()
-    default = DEFAULT_SECONDS_PER_PAGE[bool(ocr)]
-    work = sum(max(r["seconds"] - r["load_seconds"], 0.0) for r in rows) + default * PRIOR_PAGES
-    per_page = work / (sum(r["pages"] for r in rows) + PRIOR_PAGES)
-    return per_page * max(pages, 1)
-
-
-def estimate_conversion_seconds(pages: int, ocr: bool) -> float:
-    return estimate_load_seconds() + estimate_work_seconds(pages, ocr)
-
-
 def _sources() -> dict:
     with _lock, _connect() as conn:
         return {r["name"]: dict(r) for r in conn.execute("SELECT * FROM sources")}
+
+
+list_sources = _sources
+
+
+def doc_name(pdf_path, sources: dict = None) -> str:
+    """PDF 對應的文件名稱：不同位置的同名 PDF 各有一份文件；原檔已搬走的紀錄會被新路徑接手。"""
+    path = str(Path(pdf_path).resolve())
+    sources = _sources() if sources is None else sources
+    for name, source in sources.items():
+        if source["pdf_path"] == path and not source["pages"]:
+            return name
+    stem = Path(path).stem
+    owner = sources.get(stem)
+    if owner is None or not Path(owner["pdf_path"]).is_file():
+        return stem
+    return f"{stem}_{hashlib.sha1(path.encode('utf-8')).hexdigest()[:6]}"
 
 
 def source_pdf(name: str):
@@ -140,7 +151,7 @@ def source_pdf(name: str):
     return fallback if fallback.is_file() else None
 
 
-# ---------- 文件與 PDF 清單 ----------
+# ---------- 文件清單 ----------
 
 def _read_json(path):
     try:
@@ -150,122 +161,59 @@ def _read_json(path):
         return None
 
 
+def doc_converted(name: str) -> bool:
+    return (config.OUTPUT_ROOT / name / f"{name}.md").is_file()
+
+
 def list_documents() -> list:
-    """output/ 下所有已轉成 Markdown 的文件，附翻譯進度。"""
+    """加入過的 PDF，以及 output/ 下早期已轉換的文件。"""
     sources = _sources()
+    names = set(sources)
+    if config.OUTPUT_ROOT.is_dir():
+        names |= {f.name for f in config.OUTPUT_ROOT.iterdir() if doc_converted(f.name)}
     docs = []
-    if not config.OUTPUT_ROOT.is_dir():
-        return docs
-    for folder in config.OUTPUT_ROOT.iterdir():
-        md = folder / f"{folder.name}.md"
-        if not md.is_file():
-            continue
-        paper_map = _read_json(folder / f"{folder.name}_paper_map.json") or {}
-        knowledge_path = folder / f"{folder.name}_translation_knowledge.json"
-        stats = {}
-        if knowledge_path.is_file():
-            # knowledge 可能很大，只讀開頭的 metadata 不划算；直接讀取，文件數量通常不多
-            stats = ((_read_json(knowledge_path) or {}).get("metadata") or {}).get("stats") or {}
-        source = sources.get(folder.name) or {}
+    for name in names:
+        source = sources.get(name) or {}
+        paper_map = _read_json(config.OUTPUT_ROOT / name / f"{name}_paper_map.json") or {}
         docs.append({
-            "name": folder.name,
-            "title": paper_map.get("title") or folder.name,
-            "domain": paper_map.get("domain", ""),
-            "translated": stats.get("translated_blocks", 0),
-            "total": stats.get("translatable_blocks") or stats.get("translated_blocks", 0),
-            "pdf_path": source.get("pdf_path", ""),
+            "name": name,
+            "title": paper_map.get("title") or name,
             "pages": source.get("pages", ""),
-            "modified": md.stat().st_mtime,
+            "added_at": source.get("added_at", ""),
+            "converted": doc_converted(name),
+            "has_pdf": source_pdf(name) is not None,
         })
-    return sorted(docs, key=lambda d: d["modified"], reverse=True)
+    return sorted(docs, key=lambda d: d["title"].lower())
 
 
-def list_pdfs() -> list:
-    """監看資料夾中的 PDF，標示是否已轉換。"""
-    converted = {s["pdf_path"] for s in _sources().values()}
-    converted_names = {f.name for f in config.OUTPUT_ROOT.iterdir()} if config.OUTPUT_ROOT.is_dir() else set()
-    pdfs = []
-    for folder in list_folders():
-        for root, _dirs, files in os.walk(folder):
-            for fn in files:
-                if not fn.lower().endswith(".pdf"):
-                    continue
-                path = Path(root) / fn
-                pdfs.append({
-                    "path": str(path),
-                    "name": fn,
-                    "folder": folder,
-                    "size_mb": round(path.stat().st_size / 1024 ** 2, 1),
-                    "converted": str(path) in converted or path.stem in converted_names,
-                })
-                if len(pdfs) >= MAX_PDFS:
-                    return pdfs
-    return sorted(pdfs, key=lambda p: p["name"].lower())
+# ---------- 刪除翻譯資料（永遠不動原始 PDF） ----------
+
+def _doc_folder(name: str) -> Path:
+    root = config.OUTPUT_ROOT.resolve()
+    folder = (root / name).resolve()
+    if folder.parent != root:
+        raise ValueError(f"不合法的文件名稱：{name}")
+    return folder
 
 
-# ---------- 生字本 ----------
+def document_storage(name: str) -> dict:
+    files = [f for f in _doc_folder(name).rglob("*") if f.is_file()]
+    return {"files": len(files), "mb": round(sum(f.stat().st_size for f in files) / 1024 ** 2, 1)}
 
-def list_vocab() -> list:
+
+def delete_document(name: str) -> None:
+    """刪除 output/<名稱>/ 與書庫紀錄。PDF 若放在這個資料夾內就拒絕，避免連帶刪掉原檔。"""
+    folder = _doc_folder(name)
+    pdf = source_pdf(name)
+    if pdf and folder in pdf.resolve().parents:
+        raise ValueError("原始 PDF 位於翻譯資料夾內，為避免刪到原檔已停止")
+    if folder.is_dir():
+        shutil.rmtree(folder)
     with _lock, _connect() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM vocab ORDER BY id DESC")]
-
-
-def add_vocab(term: str, translation: str, category: str, doc: str = "", context: str = "") -> bool:
-    """新增生字；已存在（不分大小寫）時回傳 False。"""
-    with _lock, _connect() as conn:
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO vocab (term, translation, category, doc, context, added_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (term.strip(), translation, category, doc, context[:500], _now()))
-        return cur.rowcount > 0
-
-
-def delete_vocab(vocab_id: int) -> None:
-    with _lock, _connect() as conn:
-        conn.execute("DELETE FROM vocab WHERE id = ?", (vocab_id,))
-
-
-# ---------- 複習（Leitner 盒子：記得就升一盒、間隔加倍；忘記回到第 0 盒） ----------
-
-REVIEW_INTERVAL_DAYS = [0, 1, 2, 4, 8, 16, 32, 64]
-
-
-def due_vocab(limit: int = 30) -> dict:
-    now = _now()
-    with _lock, _connect() as conn:
-        cards = [dict(r) for r in conn.execute(
-            "SELECT * FROM vocab WHERE due IS NULL OR due <= ? ORDER BY due IS NOT NULL, due, id LIMIT ?",
-            (now, limit))]
-        total = conn.execute("SELECT COUNT(*) FROM vocab").fetchone()[0]
-        due_count = conn.execute("SELECT COUNT(*) FROM vocab WHERE due IS NULL OR due <= ?", (now,)).fetchone()[0]
-    return {"cards": cards, "due": due_count, "total": total}
-
-
-def review_vocab(vocab_id: int, remembered: bool) -> dict:
-    from datetime import timedelta
-    with _lock, _connect() as conn:
-        row = conn.execute("SELECT box FROM vocab WHERE id = ?", (vocab_id,)).fetchone()
-        if row is None:
-            raise KeyError(vocab_id)
-        box = min((row["box"] or 0) + 1, len(REVIEW_INTERVAL_DAYS) - 1) if remembered else 0
-        # 忘記的字 10 分鐘後再出現；記得的依盒子間隔
-        delta = timedelta(days=REVIEW_INTERVAL_DAYS[box]) if remembered else timedelta(minutes=10)
-        due = (datetime.now() + delta).isoformat(timespec="seconds")
-        conn.execute("UPDATE vocab SET box = ?, due = ?, reviews = reviews + 1, lapses = lapses + ? WHERE id = ?",
-                     (box, due, 0 if remembered else 1, vocab_id))
-    return {"box": box, "due": due}
-
-
-def export_anki_tsv() -> str:
-    """Anki 可直接匯入的 TSV：正面為單字，背面為譯名、例句與出處。"""
-    import html as _html
-    lines = ["#separator:tab", "#html:true", "#tags column:3"]
-    for v in list_vocab():
-        back = _html.escape(v.get("translation") or "")
-        if v.get("context"):
-            back += f"<br><br><i>{_html.escape(v['context'])}</i>"
-        if v.get("doc"):
-            back += f"<br><small>{_html.escape(v['doc'])}</small>"
-        tag = "PaperAI " + (v.get("category") or "").replace(" ", "_")
-        term = _html.escape(v["term"])
-        lines.append("\t".join(x.replace("\t", " ").replace("\n", " ") for x in (term, back, tag.strip())))
-    return "\n".join(lines) + "\n"
+        conn.execute("DELETE FROM sources WHERE name = ?", (name,))
+    state = load_state()
+    state["files"] = [f for f in state["files"] if f != name]
+    state["positions"].pop(name, None)
+    if state["last"] == name:
+        state["last"] = ""
+    _write_state(state)

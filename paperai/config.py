@@ -12,6 +12,9 @@ MODEL_NAME = "gemma4:latest"  # 需與 `ollama list` 顯示的名稱一致
 THINK = False
 NUM_CTX = 16384      # 需容納術語擷取的 25000 字元採樣
 NUM_PREDICT = 4096   # 單次回覆上限，避免失控生成
+MARKER_IDLE_SECONDS = 300       # Marker 閒置多久後關閉以釋放 VRAM
+CHUNK_TIMEOUT_SECONDS = 240     # 一段超過這個時間就放棄，公式密集的頁面可能要十分鐘以上
+ROUGH_MONTHLY_CHARS = 450_000  # 每月送 Google 的字元上限，防止意外超額
 
 
 class Doc:
@@ -31,5 +34,5 @@ class Doc:
 
     def load_markdown(self) -> str:
         if not self.md_path.is_file():
-            raise FileNotFoundError(f"找不到 Markdown：{self.md_path}（請先執行 pdftomd.py）")
+            raise FileNotFoundError(f"找不到 Markdown：{self.md_path}（文件還沒轉檔完成）")
         return self.md_path.read_text(encoding="utf-8")

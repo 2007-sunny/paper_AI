@@ -8,25 +8,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 架構重點（跨檔案才看得出來的部分）
 
-- **兩個入口共用同一份狀態**：CLI（translate.py）和本機服務（session.py）都讀寫 `_translation_cache_v2.json` 與 `_translation_knowledge.json`。服務開啟文件時用 `pipeline.restore_translations`，依區塊 `src`（原文 hash）套回既有譯文，因此兩邊的進度可以互相接續。
-- **對齊在翻譯時建立，不是事後推算**：`translate_block` 先用 spaCy 把區塊切成英文句子，再整批送給模型，並以 JSON schema（minItems/maxItems = 句數）要求回傳等長陣列。句數不符會重試一次，仍失敗就整段翻譯並設 `aligned=False`。因此英文斷句的品質直接決定對齊的品質。
-- **LaTeX 與 JSON 跳脫的衝突**：模型在 JSON 字串裡寫 `\bar`、`\text`、`\frac` 時，`\b \f \t` 會被 JSON 解析成控制字元，而且 MathJax 多半不會報錯（`\text{He}` 只會靜靜顯示成「extHe」）。`_escape_latex_in_json` 在解析前補反斜線，`_repair_control_chars` 修復舊快取。檢查輸出時要搜尋控制字元，不能只看 `mjx-merror`。
-- **快取 key 的組成**：（`PROMPT_VERSION`、模型、英文句子、本段術語的「英文→譯名」對）。修改 glossary.json 某個譯名後，只有含該術語的區塊會重新翻譯；修改提示詞必須遞增 `PROMPT_VERSION`。
-- **術語比對只有一個實作**：`glossary.term_pattern`。翻譯時挑出本段術語、aliases 改正、閱讀器標示、服務端判斷哪些區塊受術語修改影響，全部用它。
-- **服務的排程（session.Worker）**：單一執行緒處理所有 GPU 工作。優先順序依序是轉檔、有人正在看的文件、30 分鐘內看過的文件。閱讀頁用 IntersectionObserver 回報可見區塊（`/focus`），`DocSession._pick` 先翻這些，再從該位置往後。結果以 SSE 推送 `block`／`progress`／`status`／`meta`／`stale` 事件；reader.js 的 `handlers` 對應處理。
-- **未翻譯區塊保留 `items`，已翻譯的有 `units`**：`render_block` 依此決定輸出等待中或對照版本。服務在 `DocSession.originals` 保留原始區塊，術語修改後才能重翻。
-- **原版面檢視依賴 `block["page"]`**：`pages.assign_pages` 在 `DocSession.__init__` 切完區塊後、複製 `originals` 之前執行（否則重翻的區塊會失去頁碼）；`render_block` 把它輸出成 `data-page`，reader.js 的 `pdfView` 用它找出目前 PDF 頁的譯文、回報翻譯優先順序。頁碼是 PDF 的 0 起算索引（與 Marker 的 page_id、圖片檔名一致），頁碼範圍文件（`_p374-423`）也用整本 PDF 的絕對頁碼。
-- **表格也是可翻譯區塊**：保留 `source`，翻譯後多一個 `zh_source`（逐格翻譯後重組的 Markdown 表格），`units` 為空陣列；`restore_translations` 要一併還原 `zh_source`。
-- **閱讀器 HTML 同一份模板兩種模式**：`render_reader_html(server_mode=...)`。靜態檔的生字本存 localStorage、選字查詢打 `http://127.0.0.1:8000`；服務模式的生字本存 SQLite，並可修正術語。`.server-only`／`.static-only` 元素由 JS 切換顯示。
+- **分段轉檔**：`POST /api/docs` 只記錄路徑。`DocSession._next_step` 依目前頁與下一頁決定工作，缺分段才呼叫常駐的 Marker，每段 3 頁加 1 頁重疊（重疊頁的區塊丟棄）。分段區塊 id 是 `c<起始頁>b<n>`。`library.doc_converted`（有完整 `.md`）的舊文件走 `whole` 路徑，不分段。摘要與術語表用 PyMuPDF 全文，不必等 Marker。
+- **文件名稱不一定等於檔名**：不同位置的同名 PDF 由 `library.doc_name` 加上路徑 hash；要用它取名，不要用 `Path.stem`。
+- **關閉不等於刪除**：側邊欄的 × 只改 `state.files`；`DELETE /api/docs/<名稱>` 才會刪 `output/<名稱>/`，且必須先 `Worker.close_document`，正在轉檔時回 409。絕不刪除原始 PDF。
+- **粗翻與細翻的切法不同**：粗翻用 PyMuPDF 的文字區塊（也是畫面上的覆蓋範圍），細翻用 Marker 的 Markdown 區塊，兩者沒有共同 id。`DocSession.fine_translation` 在相鄰頁內比對單字重疊，所以既有文件不用重新轉檔。
+- **粗翻只在按 Ctrl 時計費**：`rough.translate` 先查 `rough_cache`，未命中才用 `reserve_chars` 記帳後呼叫 Google。不要新增背景批次粗翻。
+- **細翻只跟著閱讀位置**：`/focus` 回報目前頁，`set_focus` 把 `focus` 換成這一頁和下一頁。離開後未開始的區塊不再翻。
+- **排程（session.Worker）**：單一執行緒，只處理有 SSE 連線的文件。Marker 與 gemma4 可同時留在 8GB VRAM（實測 7.9GB，gemma4 維持 100% GPU），所以不互相卸載。Marker 無法中途取消，切頁要等目前這段；`CHUNK_TIMEOUT_SECONDS` 到了會結束程序，該段記入 `skipped`。
+- **對齊在翻譯時建立，不是事後推算**：`translate_block` 先用 spaCy 切英文句子，再以 JSON schema（minItems/maxItems = 句數）要求等長陣列。句數不符重試一次，仍失敗就整段翻譯並設 `aligned=False`。
+- **LaTeX 與 JSON 跳脫的衝突**：模型在 JSON 字串裡寫 `\bar`、`\text`、`\frac` 時，`\b \f \t` 會被解析成控制字元，MathJax 多半不報錯（`\text{He}` 會顯示成「extHe」）。`_escape_latex_in_json` 在解析前補反斜線，`_repair_control_chars` 修復舊快取。檢查輸出時要搜尋控制字元，不能只看 `mjx-merror`。
+- **細翻快取 key**：（`PROMPT_VERSION`、模型、英文句子、本段術語的「英文→譯名」對）。修改提示詞必須遞增 `PROMPT_VERSION`。
+- **頁碼是 PDF 的 0 起算索引**：與 Marker 的 page_id、圖片檔名一致；頁碼範圍文件（`_p374-423`）也用整本 PDF 的絕對頁碼。`pages.assign_pages` 必須在複製 `originals` 之前執行。
 
 ## 驗證方式
 
 沒有測試套件。改動後的驗證順序：
 
-1. 語法檢查：`python -m py_compile server.py translate.py pdftomd.py paperai/*.py tools/bench_models.py`
-2. CLI 端對端：`python translate.py --input "1804.03318v2.md" --limit 25`（輸出 `_preview_*`，不覆蓋完整版）。1804.03318v2 是篇短論文，Markdown 已經轉好；快取命中時幾秒內完成。
-3. 本機服務：用 `.claude/launch.json` 的 `paperai-server` 啟動（port 8000）；使用者自己的服務若正在 8000 轉檔，改用 `paperai-test`（port 8001，共用同一個 output/ 與 library.db，測試時別動使用者的生字與術語），在瀏覽器面板開 `/` 與 `/read/<名稱>/`。面板隱藏時視窗大小是 0×0，IntersectionObserver 不會觸發、區塊高度也會異常；需要先用 resize_window 設定大小，或直接 fetch `/api/docs/<名稱>/focus` 模擬捲動。
-4. 只改模板或渲染：`python translate.py --input "xxx.md" --render-only`；服務模式則重新整理頁面即可。
-5. 修改提示詞或換模型：`python tools/bench_models.py --input "1804.03318v2.md" --models <模型...>`，看對齊率與 `output/<名稱>/bench/` 的逐句對照報告。
+1. 語法檢查：`python -m py_compile server.py paperai/*.py tools/bench_models.py`
+2. 本機服務：用 `.claude/launch.json` 的 `paperai-server` 啟動（port 8000）；使用者自己的服務若正在 8000 轉檔，改用 `paperai-test`（port 8001，共用同一個 output/ 與 library.db）。面板隱藏時視窗大小是 0×0，需要先用 resize_window 設定大小，頁面渲染也比較慢。
+3. Ctrl 可用 JS 派送 `mousemove` 與 Control 的 keydown／keyup 模擬；粗翻會消耗真實額度，測試時只翻少量段落。
+4. 修改提示詞或換模型：`python tools/bench_models.py --input "1804.03318v2.md" --models <模型...>`，看對齊率與 `output/<名稱>/bench/` 的逐句對照報告。
 
-硬體是 RTX 4060 Laptop 8GB。模型要 100% 載入 GPU 才夠快，bench 輸出的 GPU 比例可以判斷。Marker 轉檔前服務會先卸載 Ollama 模型以釋放 VRAM。
+硬體是 RTX 4060 Laptop 8GB。模型要 100% 載入 GPU 才夠快，bench 輸出的 GPU 比例可以判斷。

@@ -1,33 +1,27 @@
-"""本機服務的背景工作：文件工作階段、翻譯排程與事件推送。
+"""本機服務的背景工作：文件工作階段、分段轉檔、細翻排程與事件推送。
 
-只有一張 GPU，所以轉檔與翻譯都由單一 Worker 執行緒依序處理：
-1. 排隊中的 PDF 轉檔（使用者明確要求）
-2. 有人正在閱讀的文件（最近捲動的優先），從目前閱讀位置往後翻譯
-3. 最近 30 分鐘內開啟過、尚未翻完的文件
-翻譯結果以事件推送給閱讀頁（SSE），並定期寫回 knowledge JSON。
+單一 Worker 執行緒處理所有 GPU 工作，而且只處理有人正在閱讀的文件：
+依序處理目前頁與下一頁，缺少 Marker 分段就先轉檔，再細翻這一頁。離開後不再排隊。
+粗翻由 API 執行緒即時處理，不經過這裡。細翻完成後以事件通知閱讀器（SSE），並定期寫回 knowledge JSON。
 """
 import copy
 import json
 import threading
 import time
 import traceback
-from collections import deque
-from datetime import datetime
 
-from . import claude_assist, config, library
+from . import config, library
 from .blocks import TRANSLATABLE_TYPES, parse_blocks
-from .convert import convert_pdf
-from .glossary import build_glossary, generate_glossary, load_user_glossary, term_pattern
+from .convert import CHUNK_PAGES, OVERLAP_PAGES, ChunkTimeout, MarkerService, chunk_start
 from .llm import save_json_atomic
-from .pages import assign_pages
+from .pages import _block_text, _words, assign_pages
 from .pipeline import build_knowledge, prepare, restore_translations
-from .render import render_block, render_glossary_rows, render_reader, render_reader_html
 from .translator import TranslationCache, translate_block
 
 SAVE_INTERVAL = 5.0     # 翻譯中最多每幾秒寫回一次 knowledge JSON
 ERROR_BACKOFF = 30.0    # 模型呼叫失敗後暫停幾秒再試（例如 Ollama 沒開）
-# 關閉閱讀頁後，背景繼續翻譯的時間；避免開過一次的大型書籍長期佔用 GPU
-BACKGROUND_WINDOW = 30 * 60
+MATCH_PARAGRAPH = 0.7   # PDF 段落的單字出現在 Marker 區塊的比例
+MATCH_BLOCK = 0.4       # Marker 區塊的單字出現在 PDF 段落的比例（跨欄段落只佔一部分）
 
 
 class DocSession:
@@ -35,19 +29,23 @@ class DocSession:
         self.name = name
         self.worker = worker
         self.doc = config.Doc(name)
-        self.markdown = self.doc.load_markdown()
-        self.blocks = parse_blocks(self.markdown)
-        # 原版面檢視需要每個區塊的頁碼；必須在複製 originals 之前，重翻的區塊才會保留頁碼
         self.pdf_path = library.source_pdf(name)
-        self.pdf_pages = assign_pages(self.blocks, self.doc.path("_meta.json"), self.pdf_path)
-        self.by_id = {b["id"]: b for b in self.blocks}
-        self.order = [b["id"] for b in self.blocks if b["type"] in TRANSLATABLE_TYPES]
-        # 保留未翻譯的原始區塊，修改術語後重新翻譯時使用
-        self.originals = {bid: copy.deepcopy(self.by_id[bid]) for bid in self.order}
-        restore_translations(self.blocks, self.doc.path("_translation_knowledge.json"))
-        self.pending = {bid for bid in self.order if "items" in self.by_id[bid]}
-        self.priority = []
-        self.focus = 0
+        self.chunk_dir = self.doc.output_dir / "chunks"
+        self.whole = library.doc_converted(name)  # 分段轉檔之前的文件有完整的 Markdown
+        self.chunks = set()
+        self.skipped = set()  # 解析逾時的分段，這次服務不再重試，維持粗翻
+        self.blocks, self.by_id, self.order, self.originals, self.pending = [], {}, [], {}, set()
+        self.focus = []
+        if self.whole:
+            self.markdown = self.doc.load_markdown()
+            self.blocks = parse_blocks(self.markdown)
+            # 必須在複製 originals 之前指定頁碼，翻譯完的區塊才會保留
+            assign_pages(self.blocks, self.doc.path("_meta.json"), self.pdf_path)
+            self._index(self.blocks)
+        else:
+            self.markdown = _pdf_text(self.pdf_path)  # 摘要與術語表用，不必等 Marker
+            for path in sorted(self.chunk_dir.glob("*.md")):
+                self._load_chunk(int(path.stem), path.read_text(encoding="utf-8"))
         self.cache = TranslationCache(self.doc.path("_translation_cache_v2.json"))
         self.lock = threading.RLock()
         self.subscribers = []
@@ -56,6 +54,7 @@ class DocSession:
         self.last_save = time.time()
         self.dirty = False
         self.status = ""
+        self.closed = False  # 文件已刪除，不再寫檔
         self.paper_map, self.glossary = None, []
         # 摘要與術語表都已存在時不需呼叫模型，直接載入
         if self.doc.path("_paper_map.json").exists() and self.doc.path("_glossary.json").exists():
@@ -68,34 +67,44 @@ class DocSession:
             done = sum(1 for bid in self.order if "units" in self.by_id[bid])
             return {"type": "progress", "done": done, "total": len(self.order), "pending": len(self.pending)}
 
-    def page_html(self) -> str:
-        with self.lock:
-            knowledge = build_knowledge(self.doc, self.paper_map or {}, self.glossary, self.blocks)
-            pdf = {"url": "source.pdf", "pages": self.pdf_pages} if self.pdf_path else None
-            return render_reader_html(knowledge, config.MODEL_NAME, self.name, server_mode=True, pdf=pdf,
-                                      claude_api=claude_assist.api_available())
+    def _index(self, blocks: list):
+        ids = [b["id"] for b in blocks if b["type"] in TRANSLATABLE_TYPES]
+        self.by_id.update((b["id"], b) for b in blocks)
+        self.order.extend(ids)
+        # 保留未翻譯的原始區塊，翻譯時使用
+        self.originals.update((bid, copy.deepcopy(self.by_id[bid])) for bid in ids)
+        restore_translations(blocks, self.doc.path("_translation_knowledge.json"))
+        self.pending.update(bid for bid in ids if "items" in self.by_id[bid])
 
-    def block_material(self, bid: str) -> dict:
-        """問 Claude 用：區塊的原文、目前譯文、圖片路徑與文件資訊。"""
-        import re
+    def _load_chunk(self, start: int, markdown: str):
+        pages = list(range(start, start + CHUNK_PAGES + OVERLAP_PAGES))
+        blocks = parse_blocks(markdown)
+        assign_pages(blocks, None, self.pdf_path, pages)
+        kept = [b for b in blocks if b["page"] < start + CHUNK_PAGES]
+        for block in kept:
+            block["id"] = f"c{start}{block['id']}"
+        self.blocks.extend(kept)
+        self._index(kept)
+        self.chunks.add(start)
+
+    def fine_translation(self, page: int, text: str):
+        """PDF 段落對應的細翻譯文；Marker 的區塊和 PDF 段落切法不同，依單字重疊比對。"""
+        words = _words(text)
+        if len(words) < 3:
+            return None
+        best, best_score = None, 0
         with self.lock:
-            block = self.by_id.get(bid)
-            if block is None:
-                raise KeyError(bid)
-            original = self.originals.get(bid, {})
-            text = "\n".join(original.get("items", [])) or block.get("source", "")
-            translation = "\n".join(s["zh"] for unit in block.get("units", []) for s in unit)
-            if block["type"] == "table":
-                translation = block.get("zh_source", "")
-            image = None
-            m = re.search(r"!\[[^\]]*\]\(([^)\s]+)\)", block.get("source", ""))
-            if m:
-                candidate = (self.doc.output_dir / m.group(1)).resolve()
-                if self.doc.output_dir.resolve() in candidate.parents and candidate.is_file():
-                    image = candidate
-            paper_map = self.paper_map or {}
-            return {"type": block["type"], "text": text, "translation": translation, "image": image,
-                    "context": {"title": paper_map.get("title", self.name), "domain": paper_map.get("domain", "")}}
+            for block in self.blocks:
+                if "units" not in block or abs(block.get("page", -9) - page) > 1:
+                    continue
+                other = _words(_block_text(block))
+                shared = len(words & other)
+                coverage, precision = shared / len(words), shared / max(len(other), 1)
+                if coverage >= MATCH_PARAGRAPH and precision >= MATCH_BLOCK and coverage + precision > best_score:
+                    best, best_score = block, coverage + precision
+            if best:
+                return "\n\n".join(" ".join(s["zh"] for s in unit) for unit in best["units"])
+        return None
 
     def set_status(self, text: str):
         self.status = text
@@ -128,35 +137,36 @@ class DocSession:
 
     # ---------- 排程 ----------
 
-    def set_focus(self, visible_ids: list):
-        """閱讀頁回報目前看得到的區塊：這些優先翻譯，之後從這裡往後。"""
+    def set_focus(self, pages: list):
+        """閱讀器回報目前頁：只處理這些頁，離開後不再排隊。"""
         with self.lock:
-            index = {bid: i for i, bid in enumerate(self.order)}
-            positions = [index[b] for b in visible_ids if b in index]
-            if positions:
-                self.focus = min(positions)
-            self.priority = [b for b in visible_ids if b in self.pending]
+            self.focus = pages
             self.last_active = time.time()
 
-    def _pick(self):
-        for bid in self.priority:
-            if bid in self.pending:
-                return bid
-        rotated = self.order[self.focus:] + self.order[:self.focus]
-        return next((bid for bid in rotated if bid in self.pending), None)
+    def _next_step(self):
+        """依頁序找下一件事：這一頁缺分段就轉檔，有分段就細翻。"""
+        for page in self.focus:
+            start = chunk_start(page)
+            if not self.whole and start not in self.chunks and start not in self.skipped:
+                return ("chunk", start)
+            bid = next((b for b in self.order if b in self.pending and self.by_id[b].get("page") == page), None)
+            if bid:
+                return ("block", bid)
+        return None
 
     def next_task(self):
         with self.lock:
             if time.time() < self.paused_until:
                 return None
+            step = self._next_step()
+            if step is None:
+                return self.save if self.dirty else None
+            kind, value = step
+            if kind == "chunk":
+                return lambda: self._convert_chunk(value)
             if self.paper_map is None:
                 return self._prepare
-            bid = self._pick()
-            if bid is None:
-                if self.dirty:
-                    return self.save
-                return None
-            return lambda: self._translate(bid)
+            return lambda: self._translate(value)
 
     # ---------- 工作 ----------
 
@@ -165,14 +175,25 @@ class DocSession:
         paper_map, glossary = prepare(self.doc, self.markdown)
         with self.lock:
             self.paper_map, self.glossary = paper_map, glossary
-        self.broadcast({
-            "type": "meta",
-            "title": paper_map.get("title", self.name),
-            "summary": paper_map.get("summary", ""),
-            "domain": paper_map.get("domain", ""),
-            "topics": "、".join(paper_map.get("topics", [])),
-            "glossary_rows": render_glossary_rows(glossary),
-        })
+        self.set_status("")
+
+    def _convert_chunk(self, start: int):
+        marker = self.worker.marker
+        pages = list(range(start, start + CHUNK_PAGES + OVERLAP_PAGES))
+        load_note = "" if marker.running else "（第一次要載入 Marker，約 40 秒）"
+        self.set_status(f"正在解析第 {start + 1}–{start + CHUNK_PAGES} 頁{load_note}")
+        try:
+            markdown = marker.convert(self.pdf_path, pages)
+        except ChunkTimeout:
+            self.skipped.add(start)
+            self.set_status(f"第 {start + 1}–{start + CHUNK_PAGES} 頁解析太久，先維持粗翻")
+            return
+        with self.lock:
+            if self.closed:
+                return
+            self.chunk_dir.mkdir(exist_ok=True)
+            (self.chunk_dir / f"{start}.md").write_text(markdown, encoding="utf-8")
+            self._load_chunk(start, markdown)
         self.set_status("")
 
     def _translate(self, bid: str):
@@ -180,51 +201,30 @@ class DocSession:
             block = copy.deepcopy(self.originals[bid])
             paper_map, glossary = self.paper_map, self.glossary
         translate_block(block, paper_map, glossary, self.cache)
-        html = render_block(block, {g["term"].lower(): g for g in glossary})
         with self.lock:
             target = self.by_id[bid]
             target.clear()
             target.update(block)
             self.pending.discard(bid)
             self.dirty = True
-        self.broadcast({"type": "block", "id": bid, "html": html})
+        self.broadcast({"type": "fine", "page": block.get("page")})
         self.broadcast(self.progress())
         if time.time() - self.last_save > SAVE_INTERVAL or not self.pending:
             self.save()
 
     def save(self):
         with self.lock:
+            if self.closed:
+                return
             knowledge = build_knowledge(self.doc, self.paper_map or {}, self.glossary, self.blocks)
             data = json.loads(json.dumps(knowledge, ensure_ascii=False))  # 取得快照後即可釋放鎖
             self.dirty = False
             self.last_save = time.time()
-            finished = not self.pending
         save_json_atomic(self.doc.path("_translation_knowledge.json"), data)
-        if finished:
-            # 全部翻完時同步更新靜態閱讀器，離線也能開
-            render_reader(data, self.doc.path("_reader.html"), config.MODEL_NAME, self.name)
 
     def on_error(self, exc: Exception):
         self.paused_until = time.time() + ERROR_BACKOFF
-        self.set_status(f"翻譯暫停：{exc}（{int(ERROR_BACKOFF)} 秒後重試；請確認 Ollama 已啟動）")
-
-    def on_glossary_changed(self, term: str) -> list:
-        """使用者修改術語後：更新術語表，含該術語的區塊重新排入翻譯（優先）。"""
-        with self.lock:
-            if self.paper_map is None:
-                return []
-            pattern = term_pattern(term)
-            affected = [bid for bid in self.order if pattern.search(" ".join(self.originals[bid]["items"]))]
-            if not affected:
-                return []
-            auto_terms = generate_glossary(self.paper_map, self.markdown, self.doc.path("_glossary.json"))
-            self.glossary = build_glossary(auto_terms, load_user_glossary(), self.markdown)
-            self.pending.update(affected)
-            self.priority = affected + [b for b in self.priority if b not in affected]
-        self.broadcast({"type": "stale", "ids": affected})
-        self.broadcast({"type": "meta", "glossary_rows": render_glossary_rows(self.glossary)})
-        self.broadcast(self.progress())
-        return affected
+        self.set_status(f"細翻暫停：{exc}（{int(ERROR_BACKOFF)} 秒後重試）")
 
 
 class Worker(threading.Thread):
@@ -232,8 +232,8 @@ class Worker(threading.Thread):
         super().__init__(daemon=True, name="paperai-worker")
         self.cv = threading.Condition()
         self.sessions = {}
-        self.convert_queue = deque()
-        self.jobs = deque(maxlen=30)  # 顯示在書庫頁的轉檔紀錄
+        self.marker = MarkerService()
+        self.running = ""  # 正在處理的文件；刪除時用
 
     # ---------- 對外介面（由 API 執行緒呼叫） ----------
 
@@ -252,51 +252,27 @@ class Worker(threading.Thread):
         with self.cv:
             self.cv.notify()
 
-    def submit_convert(self, pdf_path: str, pages: str = "") -> dict:
-        job = {"id": f"job{int(time.time() * 1000)}", "pdf": pdf_path, "pages": pages or "",
-               "status": "排隊中", "message": "", "doc": "", "time": datetime.now().strftime("%H:%M:%S")}
+    def close_document(self, name: str):
+        """刪除文件前呼叫：關閉工作階段。Marker 正在處理它時無法中斷，回傳 False。"""
         with self.cv:
-            self.jobs.appendleft(job)
-            self.convert_queue.append(job)
-            self.cv.notify()
-        return job
-
-    def jobs_snapshot(self) -> list:
-        now = time.time()
-        with self.cv:
-            jobs = [dict(j) for j in self.jobs]
-        for j in jobs:
-            if j.get("started"):
-                j["elapsed"] = (j.get("finished") or now) - j["started"]
-        return jobs
-
-    def glossary_changed(self, term: str) -> int:
-        with self.cv:
-            sessions = list(self.sessions.values())
-        count = sum(len(s.on_glossary_changed(term)) for s in sessions)
-        self.notify()
-        return count
+            if self.running == name:
+                return False
+            session = self.sessions.pop(name, None)
+        if session:
+            with session.lock:
+                session.closed = True
+                session.pending.clear()
+                session.focus = []
+        return True
 
     # ---------- 排程 ----------
 
     def _next(self):
-        # 轉檔是使用者明確要求的，優先處理；翻譯只是暫停幾分鐘
-        if self.convert_queue:
-            job = self.convert_queue.popleft()
-            return (lambda: self._convert(job)), None
         sessions = sorted(self.sessions.values(), key=lambda s: s.last_active, reverse=True)
         for s in sessions:
-            if s.has_viewers:
-                task = s.next_task()
-                if task:
-                    return task, s
-        for s in sessions:
-            if time.time() - s.last_active < BACKGROUND_WINDOW:
-                task = s.next_task()
-                if task:
-                    return task, s
-            elif s.dirty:  # 超過背景時間仍要把已翻譯的結果存檔
-                return s.save, s
+            task = s.next_task() if s.has_viewers else (s.save if s.dirty else None)
+            if task:
+                return task, s
         return None, None
 
     def run(self):
@@ -304,48 +280,22 @@ class Worker(threading.Thread):
             with self.cv:
                 task, session = self._next()
                 while task is None:
+                    self.running = ""
+                    self.marker.stop_if_idle()
                     self.cv.wait(timeout=5)
                     task, session = self._next()
+                self.running = session.name
             try:
                 task()
             except Exception as exc:  # 單一工作失敗不能讓整個服務停擺
                 traceback.print_exc()
-                if session:
-                    session.on_error(exc)
-
-    def _convert(self, job: dict):
-        job.update(status="轉換中", started=time.time(), stage=None, load_seconds=None)
-
-        def on_progress(info: dict):
-            if "pages" in info:  # 開始轉檔：依頁數與模式估計總時間
-                job.update(page_count=info["pages"], ocr=info["ocr"],
-                           estimate=library.estimate_conversion_seconds(info["pages"], info["ocr"]))
-                return
-            if job.get("load_seconds") is None:
-                # 第一次回報進度＝模型載入完成；用實際載入時間重新估計總時間
-                load = time.time() - job["started"]
-                job.update(load_seconds=load,
-                           estimate=load + library.estimate_work_seconds(job.get("page_count", 1), job.get("ocr", False)))
-            job["stage"] = info  # 整個 dict 替換，jobs_snapshot 不會讀到一半的資料
-
-        try:
-            _unload_ollama_models()  # Marker 與 Ollama 共用 8GB VRAM，先釋放
-            name = convert_pdf(job["pdf"], job["pages"], log=lambda m: job.update(message=m), progress=on_progress)
-            library.record_source(name, job["pdf"], job["pages"])
-            elapsed = time.time() - job["started"]
-            if job.get("page_count"):
-                library.record_conversion(name, job["page_count"], job.get("ocr", False), elapsed,
-                                          job.get("load_seconds"))
-            job.update(status="完成", doc=name, message=f"已轉換為 {name}（{elapsed / 60:.1f} 分鐘）",
-                       stage=None, finished=time.time())
-        except Exception as exc:
-            job.update(status="失敗", message=str(exc), stage=None, finished=time.time())
+                session.on_error(exc)
 
 
-def _unload_ollama_models():
+def _pdf_text(pdf_path) -> str:
+    import fitz
+    pdf = fitz.open(pdf_path)
     try:
-        import ollama
-        for m in ollama.ps().models:
-            ollama.generate(model=m.model, prompt="", keep_alive=0)
-    except Exception:
-        pass
+        return "\n".join(page.get_text() for page in pdf)
+    finally:
+        pdf.close()
