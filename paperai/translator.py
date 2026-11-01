@@ -1,3 +1,4 @@
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
 """逐句翻譯：送入編號英文句子，以 JSON schema 要求回傳等長譯文陣列。
 
 對齊在翻譯時就成立；模型回傳句數不符時重試一次，仍失敗則整段翻譯並標記 aligned=False。
@@ -10,7 +11,7 @@ from dataclasses import dataclass
 
 from . import config
 from .glossary import apply_aliases, find_matching_terms
-from .llm import chat, safe_json_parse, save_json_atomic
+from .llm import active_model, chat, safe_json_parse, save_json_atomic
 from .sentences import split_en_sentences
 
 # 修改提示詞或輸出格式時遞增，讓舊快取自動失效
@@ -253,7 +254,7 @@ def translate_block(block: dict, paper_map: dict, glossary: list, cache: Transla
 
     回傳是否實際呼叫了模型（False 表示命中快取）。
     """
-    model = model or config.MODEL_NAME
+    model = model or active_model()
     items = block.pop("items")
     if block["type"] == "table":
         block["src"] = source_hash(items)

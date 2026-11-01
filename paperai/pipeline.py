@@ -1,3 +1,4 @@
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
 """本機服務的細翻流程組裝。"""
 import json
 import os
@@ -6,6 +7,7 @@ from datetime import datetime
 from . import config
 from .blocks import TRANSLATABLE_TYPES
 from .glossary import apply_aliases, build_glossary, generate_glossary, get_paper_map, load_user_glossary
+from .llm import active_model
 from .translator import source_hash, units_are_valid
 
 
@@ -53,7 +55,7 @@ def build_knowledge(doc: config.Doc, paper_map: dict, glossary: list, blocks: li
         "metadata": {
             "title": paper_map.get("title", doc.base_name),
             "author": paper_map.get("author", "Unknown"),
-            "model": config.MODEL_NAME,
+            "model": active_model(),
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "preview": preview,
             "stats": {

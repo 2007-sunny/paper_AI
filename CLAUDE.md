@@ -8,13 +8,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 架構重點（跨檔案才看得出來的部分）
 
-- **分段轉檔**：`POST /api/docs` 只記錄路徑。`DocSession._next_step` 依目前頁與下一頁決定工作，缺分段才呼叫常駐的 Marker，每段 3 頁加 1 頁重疊（重疊頁的區塊丟棄）。分段區塊 id 是 `c<起始頁>b<n>`。`library.doc_converted`（有完整 `.md`）的舊文件走 `whole` 路徑，不分段。摘要與術語表用 PyMuPDF 全文，不必等 Marker。
+- **分段轉檔**：`POST /api/docs` 只記錄路徑。`DocSession._next_step` 依目前頁與下一頁決定工作，缺分段才呼叫解析引擎，每段 3 頁加 1 頁重疊（重疊頁的區塊丟棄）。分段區塊 id 是 `c<起始頁>b<n>`。`library.doc_converted`（有完整 `.md`）的舊文件走 `whole` 路徑，不分段。摘要與術語表用 PyMuPDF 全文，不必等 Marker。
 - **文件名稱不一定等於檔名**：不同位置的同名 PDF 由 `library.doc_name` 加上路徑 hash；要用它取名，不要用 `Path.stem`。
 - **關閉不等於刪除**：側邊欄的 × 只改 `state.files`；`DELETE /api/docs/<名稱>` 才會刪 `output/<名稱>/`，且必須先 `Worker.close_document`，正在轉檔時回 409。絕不刪除原始 PDF。
 - **粗翻與細翻的切法不同**：粗翻用 PyMuPDF 的文字區塊（也是畫面上的覆蓋範圍），細翻用 Marker 的 Markdown 區塊，兩者沒有共同 id。`DocSession.fine_translation` 在相鄰頁內比對單字重疊，所以既有文件不用重新轉檔。
 - **粗翻只在按 Ctrl 時計費**：`rough.translate` 先查 `rough_cache`，未命中才用 `reserve_chars` 記帳後呼叫 Google。不要新增背景批次粗翻。
-- **細翻只跟著閱讀位置**：`/focus` 回報目前頁，`set_focus` 把 `focus` 換成這一頁和下一頁。離開後未開始的區塊不再翻。
-- **排程（session.Worker）**：單一執行緒，只處理有 SSE 連線的文件。Marker 與 gemma4 可同時留在 8GB VRAM（實測 7.9GB，gemma4 維持 100% GPU），所以不互相卸載。Marker 無法中途取消，切頁要等目前這段；`CHUNK_TIMEOUT_SECONDS` 到了會結束程序，該段記入 `skipped`。
+- **細翻模式（設定存在 library.db 的 `translation`，每一步重新讀取）**：`auto` 跟著閱讀位置，`/focus` 回報目前頁，`set_focus` 把 `focus` 換成這一頁和後面 `lookahead` 頁，離開後未開始的區塊不再翻。`ctrl` 只處理 `requests`：`/translate` 未命中細翻時 `request_fine` 排入段落，`_request_step` 先補分段再用 `_match_block` 找區塊；擷取內容缺分段時排入文字為空的請求。`off` 不排任何 GPU 工作，`Worker.settings_changed` 立刻結束 Marker，手上的區塊完成後卸載模型，前端也不呼叫 `/api/explain`。`library.fine_mode` 先看 `doc_modes` 的單份文件設定，再看全域的 `fine_mode`。
+- **解析引擎**：`convert.make_parser` 優先用 `MineruService`（`.venv-mineru`），沒有安裝時用 `MarkerService`。MinerU 一律先轉成純圖片 PDF（`_image_pdf`），因為它會直接沿用壞掉的文字層（θ 變成 `\$`）；輸出經 `clean_mineru` 去掉頁碼、書眉與圖片引用。`_start` 每次都把雲端網址指向 127.0.0.1:9、關閉遙測並確認是本機模式，確認失敗就停止；不要加上 `--remote`。服務會把收到的 PDF 暫存在工作目錄，所以固定在 `config.MINERU_WORK` 執行，`_stop` 時刪除。Marker 把第 126–129 頁放在同一批會卡住超過 7 分鐘，分開跑不到 2 分鐘，所以不要加大它的分段。
+- **排程（session.Worker）**：單一執行緒，只處理有 SSE 連線的文件。解析前 `_convert_chunk` 會卸載本機模型：gemma4 佔著 VRAM 時 MinerU 從 26 秒變成約 100 秒；反過來 MinerU 閒置時 gemma4 可以重新載入並維持 100% GPU。切頁要等目前這段；`chunk_timeout_minutes` 到了會結束，該段記入 `skipped`。
 - **對齊在翻譯時建立，不是事後推算**：`translate_block` 先用 spaCy 切英文句子，再以 JSON schema（minItems/maxItems = 句數）要求等長陣列。句數不符重試一次，仍失敗就整段翻譯並設 `aligned=False`。
 - **LaTeX 與 JSON 跳脫的衝突**：模型在 JSON 字串裡寫 `\bar`、`\text`、`\frac` 時，`\b \f \t` 會被解析成控制字元，MathJax 多半不報錯（`\text{He}` 會顯示成「extHe」）。`_escape_latex_in_json` 在解析前補反斜線，`_repair_control_chars` 修復舊快取。檢查輸出時要搜尋控制字元，不能只看 `mjx-merror`。
 - **細翻快取 key**：（`PROMPT_VERSION`、模型、英文句子、本段術語的「英文→譯名」對）。修改提示詞必須遞增 `PROMPT_VERSION`。

@@ -1,3 +1,4 @@
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
 """PaperAI 本機服務：PDF 閱讀器、Ctrl 即時粗翻、本機細翻、單字查詢與問 Claude。
 
 啟動：python server.py（會自動開啟瀏覽器），或 uvicorn server:app --host 127.0.0.1 --port 8000
@@ -5,6 +6,7 @@
 import asyncio
 import html
 import json
+import re
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,14 +15,16 @@ import ollama
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import claude_assist, config, library, picker, rough
 from .convert import _page_indices, normalize_pages
+from .llm import active_model
 from .render import render_markdown
 from .session import Worker
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+_LOCAL_HOST_RE = re.compile(r"(127\.0\.0\.1|localhost)(:\d+)?", re.IGNORECASE)
 worker = Worker()
 
 
@@ -28,6 +32,7 @@ worker = Worker()
 async def lifespan(_app):
     worker.start()
     yield
+    worker.parser.cancel()
 
 
 app = FastAPI(title="PaperAI", lifespan=lifespan)
@@ -36,6 +41,9 @@ app = FastAPI(title="PaperAI", lifespan=lifespan)
 @app.middleware("http")
 async def reject_cross_site_writes(request: Request, call_next):
     """服務只綁定本機，但任何網頁都能對 127.0.0.1 發送請求；非本站來源的寫入一律拒絕。"""
+    # DNS rebinding 時 Origin 和 Host 都是攻擊者的網域，讀取也可能外洩，所以每個請求都檢查 Host
+    if not _LOCAL_HOST_RE.fullmatch(request.headers.get("host", "")):
+        return JSONResponse({"detail": "不允許的主機"}, status_code=403)
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("origin")
         if origin not in (None, f"http://{request.headers.get('host', '')}"):
@@ -62,8 +70,8 @@ def index():
 @app.get("/api/state")
 def app_state():
     return {"docs": library.list_documents(), "state": library.load_state(),
-            "usage": library.rough_usage(), "limit": config.ROUGH_MONTHLY_CHARS,
-            "claude_api": claude_assist.api_available(), "model": config.MODEL_NAME}
+            "usage": library.rough_usage(), "settings": library.translation_settings(),
+            "defaults": config.ADVANCED_DEFAULTS, "claude_api": claude_assist.api_available()}
 
 
 class StateRequest(BaseModel):
@@ -76,6 +84,44 @@ class StateRequest(BaseModel):
 def save_state(req: StateRequest):
     library.save_state(req.last, req.page, req.zoom)
     return {"ok": True}
+
+
+class SettingsRequest(BaseModel):
+    fine_mode: str | None = None
+    lookahead: int | None = Field(None, ge=0, le=2)
+    model: str | None = None
+    monthly_chars: int | None = Field(None, ge=0, le=config.ROUGH_MAX_CHARS)
+    marker_idle_minutes: int | None = Field(None, ge=1, le=60)
+    chunk_timeout_minutes: int | None = Field(None, ge=1, le=30)
+
+
+def _check_mode(mode: str) -> None:
+    if mode not in config.FINE_MODES:
+        raise HTTPException(400, f"不支援的細翻模式：{mode}")
+
+
+def _installed_models() -> list:
+    try:
+        return [m.model for m in ollama.list().models]
+    except Exception as e:
+        raise HTTPException(503, f"無法連線到 Ollama：{e}")
+
+
+@app.get("/api/models")
+def list_models():
+    return {"models": _installed_models()}
+
+
+@app.post("/api/settings")
+def save_settings(req: SettingsRequest):
+    changes = req.model_dump(exclude_none=True)
+    if "fine_mode" in changes:
+        _check_mode(changes["fine_mode"])
+    if changes.get("model", active_model()) != active_model() and changes["model"] not in _installed_models():
+        raise HTTPException(400, f"Ollama 沒有這個模型：{changes['model']}")
+    settings = library.save_translation_settings(changes)
+    worker.settings_changed()
+    return settings
 
 
 class WorkspaceRequest(BaseModel):
@@ -156,6 +202,20 @@ def delete_document(name: str):
     return {"ok": True}
 
 
+class DocModeRequest(BaseModel):
+    mode: str | None = None  # None 表示跟隨所有文件
+
+
+@app.post("/api/docs/{name}/mode")
+def save_doc_mode(name: str, req: DocModeRequest):
+    _known_doc(name)
+    if req.mode:
+        _check_mode(req.mode)
+    settings = library.save_doc_mode(name, req.mode)
+    worker.settings_changed()
+    return settings
+
+
 @app.get("/api/docs/{name}/info")
 def doc_info(name: str):
     import fitz
@@ -207,9 +267,12 @@ def _block_text(name: str, page: int, block_id: str) -> str:
 def translate_paragraph(name: str, req: TranslateRequest):
     """按下 Ctrl 時呼叫：有細翻就用細翻，否則即時粗翻。"""
     text = _block_text(name, req.page, req.block)
-    fine = worker.session(name).fine_translation(req.page, text)
+    session = worker.session(name)
+    fine = session.fine_translation(req.page, text)
     if fine:
         return {"html": render_markdown(fine), "source": "fine"}
+    session.request_fine(req.page, text)
+    worker.notify()
     try:
         return {"html": f"<p>{html.escape(rough.translate(text))}</p>", "source": "rough"}
     except rough.QuotaExceeded as e:
@@ -224,9 +287,10 @@ class FocusRequest(BaseModel):
 
 @app.post("/api/docs/{name}/focus")
 def doc_focus(name: str, req: FocusRequest):
-    """閱讀位置改變：細翻只處理目前頁和下一頁。"""
+    """閱讀位置改變：細翻只處理目前頁和後面幾頁。"""
     _pdf(name)
-    worker.session(name).set_focus([req.page, req.page + 1])
+    lookahead = library.translation_settings()["lookahead"]
+    worker.session(name).set_focus(list(range(req.page, req.page + lookahead + 1)))
     worker.notify()
     return {"ok": True}
 
@@ -273,6 +337,7 @@ def extract_content(name: str, req: ExtractRequest):
     """選取範圍的原文與 LaTeX 公式，取代截圖；不呼叫任何 API。"""
     _pdf(name)
     result = worker.session(name).extract(req.pages[:20], req.text[:50000])
+    worker.notify()
     return {**result, "html": render_markdown(result["markdown"])}
 
 
@@ -345,7 +410,7 @@ def explain_word(payload: ExplainRequest):
     user_content = f"Term: {payload.term}\n" + (f"Context: {payload.context}" if payload.context else "")
     try:
         response = ollama.chat(
-            model=config.MODEL_NAME,
+            model=active_model(),
             messages=[{"role": "system", "content": EXPLAIN_PROMPT}, {"role": "user", "content": user_content}],
             format=EXPLAIN_SCHEMA,
             think=False,  # 思考型模型關閉 thinking，查詢才會即時回應

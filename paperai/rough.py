@@ -1,3 +1,4 @@
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
 """粗翻：PyMuPDF 直接取 PDF 的文字與座標，按下 Ctrl 時才送 Google Cloud Translation（Basic v2）。
 
 不經過 Marker，加入檔案後立即可用；翻過的段落存在 library.db，同一段不會重複計費。
@@ -196,7 +197,7 @@ def translate(text: str) -> str:
     if cached is not None:
         return _apply_aliases(cached)
     query = _protect(text)
-    if not library.reserve_chars(len(query), config.ROUGH_MONTHLY_CHARS):
+    if not library.reserve_chars(len(query), library.translation_settings()["monthly_chars"]):
         raise QuotaExceeded("本月粗翻額度已用完，這一段要等本機細翻")
     result = _unprotect(_call_google(query))
     library.rough_store(key, result)

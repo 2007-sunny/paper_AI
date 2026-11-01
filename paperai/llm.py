@@ -1,3 +1,4 @@
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
 """Ollama 呼叫與 LLM JSON 解析。"""
 import json
 import os
@@ -6,7 +7,7 @@ from dataclasses import dataclass
 
 import ollama
 
-from . import config
+from . import config, library
 
 
 @dataclass
@@ -16,6 +17,18 @@ class ChatResult:
     eval_seconds: float = 0.0
 
 
+def active_model() -> str:
+    return library.translation_settings()["model"]
+
+
+def unload_model() -> None:
+    """立刻釋放 VRAM；Ollama 沒開時本來就沒有佔用。"""
+    try:
+        ollama.generate(model=active_model(), keep_alive=0)
+    except Exception as e:
+        print(f"    [WARNING] 無法卸載模型：{e}")
+
+
 def chat(prompt: str, model: str = None, fmt=None, temperature: float = None,
          num_predict: int = None) -> ChatResult:
     """呼叫 Ollama。fmt 可為 None、"json" 或 JSON schema（結構化輸出）。"""
@@ -23,7 +36,7 @@ def chat(prompt: str, model: str = None, fmt=None, temperature: float = None,
     if temperature is not None:
         options["temperature"] = temperature
     resp = ollama.chat(
-        model=model or config.MODEL_NAME,
+        model=model or active_model(),
         messages=[{"role": "user", "content": prompt}],
         think=config.THINK,
         format=fmt,

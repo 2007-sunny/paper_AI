@@ -1,3 +1,4 @@
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
 """書庫：PDF 來源紀錄、閱讀狀態與粗翻快取，存在 output/library.db（SQLite）。
 
 PDF 不需要複製到專案內；書庫只記錄路徑。
@@ -67,6 +68,40 @@ def save_workspace(files: list, folders: list) -> None:
     state = load_state()
     state.update(files=files, folders=folders)
     _write_state(state)
+
+
+def translation_settings() -> dict:
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'translation'").fetchone()
+    return {"fine_mode": config.FINE_MODE, "doc_modes": {}, **config.ADVANCED_DEFAULTS,
+            **(json.loads(row["value"]) if row else {})}
+
+
+def _write_translation_settings(settings: dict) -> None:
+    with _lock, _connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO settings VALUES ('translation', ?)",
+                     (json.dumps(settings, ensure_ascii=False),))
+
+
+def save_translation_settings(changes: dict) -> dict:
+    settings = {**translation_settings(), **changes}
+    _write_translation_settings(settings)
+    return settings
+
+
+def save_doc_mode(name: str, mode: str = None) -> dict:
+    """單份文件的細翻模式；mode 為 None 時改回跟隨所有文件。"""
+    settings = translation_settings()
+    settings["doc_modes"].pop(name, None)
+    if mode:
+        settings["doc_modes"][name] = mode
+    _write_translation_settings(settings)
+    return settings
+
+
+def fine_mode(name: str) -> str:
+    settings = translation_settings()
+    return settings["doc_modes"].get(name, settings["fine_mode"])
 
 
 def folder_pdfs(folder: str) -> list:
@@ -217,3 +252,4 @@ def delete_document(name: str) -> None:
     if state["last"] == name:
         state["last"] = ""
     _write_state(state)
+    save_doc_mode(name)

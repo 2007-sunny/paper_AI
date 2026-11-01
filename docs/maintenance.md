@@ -14,14 +14,17 @@
 | 文件命名（同名 PDF 分開、搬走的檔案接回舊資料） | `library.doc_name` |
 | 刪除翻譯資料 | 路由 `DELETE /api/docs/<名稱>` → `Worker.close_document`、`library.delete_document`（拒絕刪除放在翻譯資料夾內的 PDF；粗翻快取依內容共用，不隨文件刪除） |
 | 分段轉檔（文字層損壞時自動 OCR） | `convert.MarkerService`、`text_layer_is_broken`、`CHUNK_PAGES`、`OVERLAP_PAGES`；常駐程序 `marker_server.py`；存在 `output/<名稱>/chunks/<起始頁>.md` |
-| 分段載入與跳過 | `DocSession._convert_chunk`、`_load_chunk`、`skipped`；`config.CHUNK_TIMEOUT_SECONDS`、`MARKER_IDLE_SECONDS` |
+| 解析引擎 | `convert.make_parser`、`MineruService`（`_start` 鎖定本機模式）、`MarkerService`、`_image_pdf`、`clean_mineru` |
+| 分段載入與跳過 | `DocSession._convert_chunk`、`_load_chunk`、`skipped`；設定 `chunk_timeout_minutes`、`marker_idle_minutes` |
 | 每頁文字與座標 | `rough.page_blocks`（路由 `/api/docs/<名稱>/pages/<頁>`），過濾規則 `_is_translatable` |
-| 粗翻與每月上限 | `rough.translate`、`library.reserve_chars`、`config.ROUGH_MONTHLY_CHARS` |
+| 粗翻與每月上限 | `rough.translate`、`library.reserve_chars`、設定 `monthly_chars` |
 | 粗翻用語修正 | `rough._apply_aliases`，讀 `glossary.json` 的 `aliases` |
 | 段落翻譯路由 | `POST /api/docs/<名稱>/translate`：先查細翻，再粗翻 |
-| 粗細翻對應 | `DocSession.fine_translation`（`MATCH_PARAGRAPH`、`MATCH_BLOCK`） |
+| 粗細翻對應 | `DocSession.fine_translation`、`_match_block`（`MATCH_PARAGRAPH`、`MATCH_BLOCK`） |
+| 翻譯設定 | `library.translation_settings`、`save_translation_settings`、`save_doc_mode`、`fine_mode`；路由 `/api/settings`、`/api/models`、`/api/docs/<名稱>/mode`；預設值 `config.ADVANCED_DEFAULTS` |
+| 細翻模式排程 | `DocSession._next_step`（`_focus_step`、`_request_step`、`request_fine`）；`Worker.settings_changed`、`parser.cancel`、`llm.unload_model` |
 | 背景排程優先順序 | `session.Worker._next` |
-| 細翻範圍（目前頁與下一頁） | 路由 `/focus` → `DocSession.set_focus`、`_next_step` |
+| 細翻範圍（目前頁與預先頁數） | 路由 `/focus` → `DocSession.set_focus`、`_focus_step` |
 | 區塊對應 PDF 頁碼 | `pages.assign_pages` |
 | 表格翻譯 | `translator.translate_table` |
 | 單字查詢 | 路由 `/api/lookup`（Google）、`/api/explain`（本機） |
@@ -36,6 +39,7 @@ SSE 事件（`/api/docs/<名稱>/events`）：`fine`（page）、`progress`（do
 | 功能 | 位置 |
 |---|---|
 | 側邊欄與輪詢 | `renderSidebar`（`sideView`：files／history）、`refresh` |
+| 設定選單與翻譯設置 | `showFlyout`、`renderSettings`、`saveSettings`、`loadModels`、`currentMode` |
 | 資料夾樹（次級資料夾預設收合） | `folderTree`、`treeRows` |
 | 刪除流程 | `startDelete`、`delete-next`、`delete-confirm` |
 | PDF 顯示與文字層 | `openDoc`、`renderPage`、`fitPages`（PDF.js 3.11 由 cdnjs 載入） |

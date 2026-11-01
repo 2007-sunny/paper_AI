@@ -34,6 +34,8 @@
     }
 
     // ---------- 側邊欄 ----------
+    let lastReported = null;
+    let reportTimer = null;
     let app = { docs: [], state: { last: '', positions: {}, zoom: 1 } };
     let current = null;  // { name, pdf, pages, events }
 
@@ -94,20 +96,21 @@
     }
     function renderSidebar() {
         $('file-actions').hidden = sideView !== 'files';
-        document.querySelectorAll('.side-tab').forEach((b) => b.classList.toggle('active', b.dataset.side === sideView));
+        $('history-head').hidden = sideView !== 'history';
         const { files = [], folders = [] } = app.state;
         if (sideView === 'files') {
             const open = files.map((n) => app.docs.find((d) => d.name === n)).filter(Boolean)
                 .map((d) => docRow(d, `<button class="doc-action" data-close-file="${escapeHtml(d.name)}" title="關閉（保留在歷史）">×</button>`));
             $('doc-list').innerHTML = (open.join('') + folders.map(folderBlock).join(''))
-                || '<p class="doc-note">開啟檔案或資料夾開始閱讀；看過的文件在「歷史」。</p>';
+                || '<p class="doc-note">開啟檔案或資料夾開始閱讀；看過的文件在左下角設定的「歷史管理」。</p>';
         } else {
             $('doc-list').innerHTML = app.docs.map((d) =>
                 docRow(d, `<button class="doc-action" data-delete="${escapeHtml(d.name)}" title="刪除翻譯">刪除</button>`)).join('')
                 || '<p class="doc-note">還沒有文件。</p>';
         }
-        const used = Math.round(app.usage / 1000), limit = Math.round(app.limit / 1000);
-        $('usage').textContent = `本月粗翻 ${used}k / ${limit}k 字元`;
+        const used = Math.round(app.usage / 1000), limit = Math.round(app.settings.monthly_chars / 1000);
+        $('usage').textContent = `粗翻 ${used}k / ${limit}k｜細翻：${MODE_LABELS[currentMode()]}`;
+        renderSettings();
     }
     async function refresh() {
         try {
@@ -169,10 +172,10 @@
         }
         if (remove) startDelete(remove);
     });
-    document.querySelectorAll('.side-tab').forEach((btn) => btn.addEventListener('click', () => {
-        sideView = btn.dataset.side;
+    $('history-back').addEventListener('click', () => {
+        sideView = 'files';
         renderSidebar();
-    }));
+    });
     $('toggle-sidebar').addEventListener('click', () => {
         document.body.classList.toggle('side-closed');
         fitPages();
@@ -200,6 +203,98 @@
             loadFolders();
         } catch (e) { notify(e.message); }
     });
+
+    // ---------- 設定選單與翻譯設置 ----------
+    const MODE_LABELS = { auto: '自動', ctrl: '按 Ctrl 才翻', off: '關閉' };
+    const MODE_HINTS = {
+        auto: '讀到哪裡，就解析並細翻到哪裡。',
+        ctrl: '按 Ctrl 先顯示粗翻，同時細翻這一段，完成後自動換掉。',
+        off: '省電：不用 GPU，停止解析、細翻和單字的本機補充；已完成的細翻照常顯示。',
+    };
+    const SETTING_INPUTS = { 'set-lookahead': 'lookahead', 'set-model': 'model', 'set-monthly': 'monthly_chars',
+                             'set-idle': 'marker_idle_minutes', 'set-timeout': 'chunk_timeout_minutes' };
+    function currentMode() {
+        return app.settings.doc_modes[current?.name] ?? app.settings.fine_mode;
+    }
+    function renderSettings() {
+        const mode = currentMode();
+        const scope = current && app.settings.doc_modes[current.name] ? 'doc' : 'all';
+        document.querySelectorAll('#fine-modes button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+        document.querySelectorAll('#mode-scope button').forEach((b) => b.classList.toggle('active', b.dataset.scope === scope));
+        document.querySelector('#mode-scope [data-scope="doc"]').disabled = !current;
+        $('mode-hint').textContent = MODE_HINTS[mode];
+        $('scope-hint').textContent = current ? $('doc-title').textContent : '開啟文件後才能單獨設定。';
+        $('usage-detail').textContent = `本月 ${app.usage.toLocaleString()} / ${app.settings.monthly_chars.toLocaleString()} 字元`;
+        Object.entries(SETTING_INPUTS).forEach(([id, key]) => {
+            if (document.activeElement !== $(id)) $(id).value = app.settings[key];
+        });
+    }
+    async function saveSettings(changes, url = '/api/settings') {
+        try {
+            app.settings = await api(url, changes);
+            lastReported = null;  // 重新回報目前頁，新的模式與預先頁數才會生效
+            reportPosition();
+        } catch (e) { notify(e.message); }
+        renderSidebar();
+    }
+    async function loadModels() {
+        const select = $('set-model');
+        let models = [];
+        try { models = (await api('/api/models')).models; }
+        catch (e) { notify(e.message); }
+        const names = [...new Set([app.settings.model, ...models])];
+        select.innerHTML = names.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+        select.value = app.settings.model;
+    }
+
+    let flyoutTimer = null;
+    function showFlyout(open) {
+        clearTimeout(flyoutTimer);
+        $('settings-flyout').hidden = !open;
+        $('settings-button').setAttribute('aria-expanded', open);
+    }
+    $('settings-menu').addEventListener('mouseenter', () => showFlyout(true));
+    $('settings-menu').addEventListener('mouseleave', () => {
+        flyoutTimer = setTimeout(() => showFlyout(false), 300);
+    });
+    $('settings-menu').addEventListener('focusout', (e) => {
+        if (!$('settings-menu').contains(e.relatedTarget)) showFlyout(false);
+    });
+    $('settings-button').addEventListener('click', () => showFlyout(true));
+    $('open-history').addEventListener('click', () => {
+        showFlyout(false);
+        sideView = 'history';
+        renderSidebar();
+    });
+    $('open-translation').addEventListener('click', () => {
+        showFlyout(false);
+        $('settings-panel').hidden = false;
+        renderSettings();
+        loadModels();
+    });
+    $('settings-close').addEventListener('click', () => { $('settings-panel').hidden = true; });
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        showFlyout(false);
+        $('settings-panel').hidden = true;
+    });
+    $('fine-modes').addEventListener('click', (e) => {
+        const { mode } = e.target.dataset;
+        if (!mode) return;
+        if (current && app.settings.doc_modes[current.name]) saveSettings({ mode }, `${docApi(current.name)}/mode`);
+        else saveSettings({ fine_mode: mode });
+    });
+    $('mode-scope').addEventListener('click', (e) => {
+        const { scope } = e.target.dataset;
+        if (!scope || !current) return;
+        saveSettings({ mode: scope === 'doc' ? currentMode() : null }, `${docApi(current.name)}/mode`);
+    });
+    Object.entries(SETTING_INPUTS).forEach(([id, key]) => $(id).addEventListener('change', () => {
+        const value = $(id).value;
+        if (!$(id).checkValidity()) { notify(`請輸入 ${$(id).min}–${$(id).max} 之間的整數`); return; }
+        saveSettings({ [key]: key === 'model' ? value : Number(value) });
+    }));
+    $('settings-reset').addEventListener('click', () => saveSettings({ ...app.defaults }));
 
     // ---------- 刪除翻譯：預覽 → 說明 → 確認 ----------
     let deleting = null;
@@ -376,8 +471,6 @@
     }
 
     // ---------- 閱讀位置：記住頁碼，並讓細翻跟著目前頁 ----------
-    let lastReported = null;
-    let reportTimer = null;
     function reportPosition() {
         clearTimeout(reportTimer);
         reportTimer = setTimeout(() => {
@@ -415,12 +508,14 @@
     let statusText = '';
     const handlers = {
         progress(msg) {
-            if (!statusText) setStatus(msg.pending ? '' : '已全部細翻');
+            if (!statusText) setStatus(msg.pending || currentMode() !== 'auto' ? '' : '已全部細翻');
         },
         status(msg) { statusText = msg.text; setStatus(msg.text); },
         fine(msg) {
-            // 粗翻顯示中的段落換成細翻
-            holderOf(msg.page)?.querySelectorAll('.overlay:not(.fine)').forEach((el) => fillOverlay(el, msg.page));
+            // 粗翻顯示中的段落換成細翻；區塊可能被歸到相鄰頁
+            [msg.page - 1, msg.page, msg.page + 1].forEach((page) => {
+                holderOf(page)?.querySelectorAll('.overlay:not(.fine)').forEach((el) => fillOverlay(el, page));
+            });
         },
     };
     function connectEvents() {
@@ -620,11 +715,13 @@
         $('lookup').hidden = false;
         $('lookup-term').textContent = text;
         $('lookup-zh').textContent = '查詢中…';
-        $('lookup-more').textContent = '本機模型正在依上下文補充…';
+        const useLocal = currentMode() !== 'off';  // 關閉細翻時不用 GPU，只顯示 Google 譯名
+        $('lookup-more').textContent = useLocal ? '本機模型正在依上下文補充…' : '';
         $('lookup-sentences').innerHTML = '';
         api('/api/lookup', { term: text })
             .then((r) => { if (id === lookupId) $('lookup-zh').textContent = r.translation; })
             .catch((e) => { if (id === lookupId) $('lookup-zh').textContent = e.message; });
+        if (!useLocal) return;
         try {
             const more = await api('/api/explain', { term: text, context });
             if (id !== lookupId) return;

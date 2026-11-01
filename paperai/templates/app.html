@@ -17,16 +17,25 @@ __CSS__
 </head>
 <body>
     <aside class="sidebar" id="sidebar">
-        <div class="side-tabs">
-            <button class="side-tab active" data-side="files">檔案</button>
-            <button class="side-tab" data-side="history">歷史</button>
+        <div class="history-head" id="history-head" hidden>
+            <button class="tool" id="history-back">← 返回</button>
+            <strong>歷史管理</strong>
         </div>
         <div class="side-actions" id="file-actions">
             <button class="tool" id="open-file">開啟檔案</button>
             <button class="tool" id="open-folder">開啟資料夾</button>
         </div>
         <nav class="doc-list" id="doc-list"></nav>
-        <div class="side-foot" id="usage"></div>
+        <div class="side-foot">
+            <div class="settings-menu" id="settings-menu">
+                <button class="gear" id="settings-button" aria-label="設定" aria-haspopup="menu" aria-expanded="false">⚙</button>
+                <div class="settings-flyout" id="settings-flyout" role="menu" hidden>
+                    <button role="menuitem" id="open-history">歷史管理</button>
+                    <button role="menuitem" id="open-translation">翻譯設置</button>
+                </div>
+            </div>
+            <span id="usage"></span>
+        </div>
     </aside>
 
     <main class="main">
@@ -44,6 +53,46 @@ __CSS__
             <div class="pages" id="pages"></div>
         </div>
     </main>
+
+    <section class="settings-panel" id="settings-panel" hidden>
+        <div class="lookup-head">
+            <strong>翻譯設置</strong>
+            <button class="tool" id="settings-close" aria-label="關閉">×</button>
+        </div>
+        <div class="setting">
+            <span class="setting-name">細翻模式</span>
+            <div class="segments" id="fine-modes">
+                <button data-mode="auto">自動</button>
+                <button data-mode="ctrl">按 Ctrl 才翻</button>
+                <button data-mode="off">關閉</button>
+            </div>
+            <p class="doc-note" id="mode-hint"></p>
+        </div>
+        <div class="setting">
+            <span class="setting-name">套用範圍</span>
+            <div class="segments" id="mode-scope">
+                <button data-scope="all">所有文件</button>
+                <button data-scope="doc">僅此文件</button>
+            </div>
+            <p class="doc-note" id="scope-hint"></p>
+        </div>
+        <div class="setting">
+            <span class="setting-name">粗翻用量</span>
+            <p class="setting-value" id="usage-detail"></p>
+        </div>
+        <details class="advanced">
+            <summary>進階</summary>
+            <label class="setting-row">預先細翻頁數
+                <select id="set-lookahead"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select>
+            </label>
+            <label class="setting-row">本機模型<select id="set-model"></select></label>
+            <label class="setting-row">粗翻每月上限（字元）<input id="set-monthly" type="number" min="0" max="500000"></label>
+            <label class="setting-row">解析模型閒置後釋放 VRAM（分鐘）<input id="set-idle" type="number" min="1" max="60"></label>
+            <label class="setting-row">每段解析逾時（分鐘）<input id="set-timeout" type="number" min="1" max="30"></label>
+            <p class="doc-note">換模型只影響之後翻譯的段落，已完成的譯文不會重翻。</p>
+            <button class="tool" id="settings-reset">還原預設值</button>
+        </details>
+    </section>
 
     <div class="selection-menu" id="selection-menu" hidden>
         <button id="menu-lookup">查詢</button>

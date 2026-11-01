@@ -1,7 +1,9 @@
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
 """本機服務的背景工作：文件工作階段、分段轉檔、細翻排程與事件推送。
 
 單一 Worker 執行緒處理所有 GPU 工作，而且只處理有人正在閱讀的文件：
-依序處理目前頁與下一頁，缺少 Marker 分段就先轉檔，再細翻這一頁。離開後不再排隊。
+細翻模式 auto 依序處理目前頁與後面幾頁，缺少分段就先轉檔，再細翻這一頁，離開後不再排隊；
+ctrl 只處理按過 Ctrl 的段落；off 完全不用 GPU。
 粗翻由 API 執行緒即時處理，不經過這裡。細翻完成後以事件通知閱讀器（SSE），並定期寫回 knowledge JSON。
 """
 import copy
@@ -12,8 +14,8 @@ import traceback
 
 from . import config, library
 from .blocks import TRANSLATABLE_TYPES, parse_blocks
-from .convert import CHUNK_PAGES, OVERLAP_PAGES, ChunkTimeout, MarkerService, chunk_start
-from .llm import save_json_atomic
+from .convert import CHUNK_PAGES, OVERLAP_PAGES, ChunkCancelled, ChunkTimeout, chunk_start, make_parser
+from .llm import save_json_atomic, unload_model
 from .pages import _block_text, _words, assign_pages, word_list
 from .pipeline import build_knowledge, prepare, restore_translations
 from .rough import fix_font
@@ -38,6 +40,7 @@ class DocSession:
         self.skipped = set()  # 解析逾時的分段，這次服務不再重試，維持粗翻
         self.blocks, self.by_id, self.order, self.originals, self.pending = [], {}, [], {}, set()
         self.focus = []
+        self.requests = []  # ctrl 模式等待處理的 (頁碼, 段落文字)；文字為空表示只需要解析這一頁
         if self.whole:
             self.markdown = self.doc.load_markdown()
             self.blocks = parse_blocks(self.markdown)
@@ -89,21 +92,27 @@ class DocSession:
         self._index(kept)
         self.chunks.add(start)
 
-    def fine_translation(self, page: int, text: str):
-        """PDF 段落對應的細翻譯文；Marker 的區塊和 PDF 段落切法不同，依單字重疊比對。"""
+    def _match_block(self, page: int, text: str, translated: bool = True):
+        """PDF 段落對應的區塊；Marker 的區塊和 PDF 段落切法不同，依單字重疊比對。"""
         words = _words(text)
         if len(words) < 3:
             return None
         best, best_score = None, 0
+        for block in self.blocks:
+            if block["id"] not in self.originals or abs(block.get("page", -9) - page) > 1:
+                continue
+            if translated and "units" not in block:
+                continue
+            other = _words(_block_text(block))
+            shared = len(words & other)
+            coverage, precision = shared / len(words), shared / max(len(other), 1)
+            if coverage >= MATCH_PARAGRAPH and precision >= MATCH_BLOCK and coverage + precision > best_score:
+                best, best_score = block, coverage + precision
+        return best
+
+    def fine_translation(self, page: int, text: str):
         with self.lock:
-            for block in self.blocks:
-                if "units" not in block or abs(block.get("page", -9) - page) > 1:
-                    continue
-                other = _words(_block_text(block))
-                shared = len(words & other)
-                coverage, precision = shared / len(words), shared / max(len(other), 1)
-                if coverage >= MATCH_PARAGRAPH and precision >= MATCH_BLOCK and coverage + precision > best_score:
-                    best, best_score = block, coverage + precision
+            best = self._match_block(page, text)
             if best:
                 return "\n\n".join(" ".join(s["zh"] for s in unit) for unit in best["units"])
         return None
@@ -127,8 +136,10 @@ class DocSession:
         words = word_list(text)
         head, tail = set(words[:EDGE_WORDS]), set(words[-EDGE_WORDS:])
         with self.lock:
-            waiting = not self.whole and any(
-                chunk_start(p) not in self.chunks and chunk_start(p) not in self.skipped for p in pages)
+            missing = [p for p in pages if self._missing_chunk(p) is not None]
+            waiting = bool(missing) and self.mode != "off"
+            if self.mode == "ctrl":
+                self.requests.extend((p, "") for p in missing if (p, "") not in self.requests)
             blocks = sorted((b for b in self.blocks if b.get("page") in pages), key=lambda b: b["page"])
             scored = [(i, _words(self._source_text(b))) for i, b in enumerate(blocks) if b["type"] in TRANSLATABLE_TYPES]
             if not scored or not head:
@@ -178,16 +189,47 @@ class DocSession:
             self.focus = pages
             self.last_active = time.time()
 
-    def _next_step(self):
+    @property
+    def mode(self) -> str:
+        return library.fine_mode(self.name)
+
+    def request_fine(self, page: int, text: str):
+        """ctrl 模式：使用者按 Ctrl 的段落排入細翻。"""
+        with self.lock:
+            if self.mode == "ctrl" and (page, text) not in self.requests:
+                self.requests.append((page, text))
+
+    def _missing_chunk(self, page: int):
+        start = chunk_start(page)
+        return None if self.whole or start in self.chunks or start in self.skipped else start
+
+    def _focus_step(self):
         """依頁序找下一件事：這一頁缺分段就轉檔，有分段就細翻。"""
         for page in self.focus:
-            start = chunk_start(page)
-            if not self.whole and start not in self.chunks and start not in self.skipped:
+            start = self._missing_chunk(page)
+            if start is not None:
                 return ("chunk", start)
             bid = next((b for b in self.order if b in self.pending and self.by_id[b].get("page") == page), None)
             if bid:
                 return ("block", bid)
         return None
+
+    def _request_step(self):
+        """逐一處理按過 Ctrl 的段落；找不到對應區塊就維持粗翻。"""
+        while self.requests:
+            page, text = self.requests[0]
+            start = self._missing_chunk(page)
+            if start is not None:
+                return ("chunk", start)
+            block = self._match_block(page, text, translated=False) if text else None
+            if block and block["id"] in self.pending:
+                return ("block", block["id"])
+            self.requests.pop(0)
+        return None
+
+    def _next_step(self):
+        mode = self.mode
+        return self._focus_step() if mode == "auto" else self._request_step() if mode == "ctrl" else None
 
     def next_task(self):
         with self.lock:
@@ -213,15 +255,19 @@ class DocSession:
         self.set_status("")
 
     def _convert_chunk(self, start: int):
-        marker = self.worker.marker
+        parser = self.worker.parser
         pages = list(range(start, start + CHUNK_PAGES + OVERLAP_PAGES))
-        load_note = "" if marker.running else "（第一次要載入 Marker，約 40 秒）"
+        load_note = "" if parser.running else "（第一次要載入解析模型，約 1 分鐘）"
         self.set_status(f"正在解析第 {start + 1}–{start + CHUNK_PAGES} 頁{load_note}")
+        unload_model()  # 兩邊同時佔著 VRAM 時解析會慢好幾倍，重新載入本機模型只要約 15 秒
         try:
-            markdown = marker.convert(self.pdf_path, pages)
+            markdown = parser.convert(self.pdf_path, pages)
         except ChunkTimeout:
             self.skipped.add(start)
             self.set_status(f"第 {start + 1}–{start + CHUNK_PAGES} 頁解析太久，先維持粗翻")
+            return
+        except ChunkCancelled:
+            self.set_status("")
             return
         with self.lock:
             if self.closed:
@@ -235,6 +281,8 @@ class DocSession:
         with self.lock:
             block = copy.deepcopy(self.originals[bid])
             paper_map, glossary = self.paper_map, self.glossary
+        if self.status:  # 例如上一段的解析逾時提示
+            self.set_status("")
         translate_block(block, paper_map, glossary, self.cache)
         with self.lock:
             target = self.by_id[bid]
@@ -267,8 +315,9 @@ class Worker(threading.Thread):
         super().__init__(daemon=True, name="paperai-worker")
         self.cv = threading.Condition()
         self.sessions = {}
-        self.marker = MarkerService()
+        self.parser = make_parser()
         self.running = ""  # 正在處理的文件；刪除時用
+        self.release_gpu = False  # 切到關閉後，等手上的工作結束就卸載本機模型
 
     # ---------- 對外介面（由 API 執行緒呼叫） ----------
 
@@ -286,6 +335,18 @@ class Worker(threading.Thread):
     def notify(self):
         with self.cv:
             self.cv.notify()
+
+    def _gpu_wanted(self) -> bool:
+        return any(s.has_viewers and s.mode != "off" for s in self.sessions.values())
+
+    def settings_changed(self):
+        """翻譯設定改變：正在閱讀的文件都不需要 GPU 時，立刻停掉 Marker 並卸載模型。"""
+        with self.cv:
+            wanted = self._gpu_wanted()
+            self.release_gpu = not wanted
+            self.cv.notify()
+        if not wanted:
+            self.parser.cancel()
 
     def close_document(self, name: str):
         """刪除文件前呼叫：關閉工作階段。Marker 正在處理它時無法中斷，回傳 False。"""
@@ -311,12 +372,18 @@ class Worker(threading.Thread):
         return None, None
 
     def run(self):
+        self.parser.reset()
         while True:
             with self.cv:
                 task, session = self._next()
                 while task is None:
                     self.running = ""
-                    self.marker.stop_if_idle()
+                    self.parser.stop_if_idle()
+                    if self.release_gpu:
+                        self.release_gpu = False
+                        if not self._gpu_wanted():
+                            self.parser.cancel()
+                            unload_model()
                     self.cv.wait(timeout=5)
                     task, session = self._next()
                 self.running = session.name

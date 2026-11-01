@@ -1,9 +1,13 @@
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
 """全域設定與文件路徑。"""
 import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_ROOT = PROJECT_ROOT / "output"
+# MinerU 裝在獨立環境，避免和 Marker 的套件版本衝突；沒有安裝時改用 Marker
+MINERU_EXE = PROJECT_ROOT / ".venv-mineru" / "Scripts" / "mineru.exe"
+MINERU_WORK = OUTPUT_ROOT / "mineru_work"  # 服務在這裡暫存收到的 PDF，停止時刪除
 # 跨文件共用、可手動維護的術語表；優先於自動生成的術語表
 USER_GLOSSARY_PATH = PROJECT_ROOT / "glossary.json"
 
@@ -12,9 +16,18 @@ MODEL_NAME = "gemma4:latest"  # 需與 `ollama list` 顯示的名稱一致
 THINK = False
 NUM_CTX = 16384      # 需容納術語擷取的 25000 字元採樣
 NUM_PREDICT = 4096   # 單次回覆上限，避免失控生成
-MARKER_IDLE_SECONDS = 300       # Marker 閒置多久後關閉以釋放 VRAM
-CHUNK_TIMEOUT_SECONDS = 240     # 一段超過這個時間就放棄，公式密集的頁面可能要十分鐘以上
 ROUGH_MONTHLY_CHARS = 450_000  # 每月送 Google 的字元上限，防止意外超額
+ROUGH_MAX_CHARS = 500_000      # Google 每月免費額度，設定頁不能超過
+FINE_MODES = ("auto", "ctrl", "off")  # 讀到就翻／按 Ctrl 才翻／關閉（不用 GPU）
+FINE_MODE = "auto"
+# 設定頁「進階」的預設值，使用者調整後存在 library.db
+ADVANCED_DEFAULTS = {
+    "lookahead": 1,                 # 目前頁之後預先細翻幾頁
+    "model": MODEL_NAME,
+    "monthly_chars": ROUGH_MONTHLY_CHARS,
+    "marker_idle_minutes": 5,       # Marker 閒置多久後關閉以釋放 VRAM
+    "chunk_timeout_minutes": 4,     # 一段超過這個時間就放棄，公式密集的頁面可能要十分鐘以上
+}
 
 
 class Doc:
