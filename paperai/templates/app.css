@@ -73,6 +73,9 @@ body.side-closed .sidebar { display: none; }
 .figure-box .tool { position: absolute; top: 6px; right: 6px; pointer-events: auto; opacity: .3; transition: opacity .12s; }
 .figure-box .tool:hover { opacity: 1; }
 
+.citation-box { position: absolute; pointer-events: none; outline: 2px solid #e8590c; outline-offset: 1px; background: rgba(232, 89, 12, .08); }
+.citation-box .tool { position: absolute; top: -14px; right: -14px; padding: 0 6px; pointer-events: auto; line-height: 1.4; }
+
 .selection-menu { position: fixed; z-index: 20; display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--panel); box-shadow: 0 2px 8px rgba(0, 0, 0, .25); }
 .selection-menu button { padding: 4px 10px; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
 .selection-menu button:hover { background: var(--active); }

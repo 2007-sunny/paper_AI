@@ -5,3 +5,5 @@ fastapi
 pydantic
 uvicorn
 PyMuPDF
+rapidocr  # 掃描頁沒有文字層時的本機 OCR（粗翻用）
+rapid-layout  # 掃描頁的版面分析：分出標題、內文、公式；模型約 7MB，第一次使用時下載

@@ -371,7 +371,7 @@
             holder.style.height = `${pageWidth() / Number(holder.dataset.aspect)}px`;
             delete holder.dataset.rendered;
             holder.querySelector('canvas')?.remove();
-            holder.querySelector('.textLayer')?.remove();
+            holder.querySelectorAll('.textLayer').forEach((layer) => layer.remove());
             lazy.unobserve(holder);
             lazy.observe(holder);
             holder.querySelectorAll('.overlay').forEach(fitOverlay);
@@ -401,6 +401,42 @@
             textContentSource: await page.getTextContent(), container: layer,
             viewport: page.getViewport({ scale: cssScale }), textDivs: [],
         }).promise;
+
+        ensureOcrLayer(holder);
+    }
+
+    // 掃描頁：捲動停下後，只替目前頁與前後各一頁做 OCR。捲動途中經過的頁不做，
+    // 否則上百頁排隊，佔滿伺服器的工作執行緒，按 Ctrl 的翻譯請求要等好幾分鐘
+    let settledPage = null;
+    async function ensureOcrLayer(holder) {
+        const page = Number(holder.dataset.page);
+        const canvas = holder.querySelector('canvas');
+        // 頁面還在渲染（沒有 .textLayer）時先跳過，renderPage 完成後會再呼叫
+        if (!canvas || !holder.querySelector('.textLayer') || holder.querySelector('.ocr-text')
+            || settledPage === null || Math.abs(page - settledPage) > 1) return;
+        const owner = current;
+        const data = await pageData(page).catch(() => null);
+        if (data?.ocr_lines?.length && current === owner && holder.contains(canvas) && !holder.querySelector('.ocr-text')) {
+            renderOcrLayer(holder, data.ocr_lines);
+        }
+    }
+
+    // 掃描頁沒有文字層：用 OCR 的文字行建一層透明文字，才能選取、複製、查詢與擷取
+    function renderOcrLayer(holder, lines) {
+        holder.querySelector('.ocr-text')?.remove();
+        const layer = document.createElement('div');
+        layer.className = 'textLayer ocr-text';
+        holder.querySelector('.textLayer').after(layer);
+        const width = holder.clientWidth, height = holder.clientHeight;
+        lines.forEach((line) => {
+            const span = document.createElement('span');
+            span.textContent = line.text;
+            Object.assign(span.style, { left: `${line.left}%`, top: `${line.top}%`,
+                                        fontSize: `${line.height / 100 * height * 0.85}px` });
+            layer.append(span, document.createElement('br'));
+            const natural = span.getBoundingClientRect().width;
+            if (natural) span.style.transform = `scaleX(${line.width / 100 * width / natural})`;
+        });
     }
 
     const lazy = new IntersectionObserver((entries) => {
@@ -425,7 +461,7 @@
         pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.js';
     }
 
-    async function openDoc(name) {
+    async function openDoc(name, startPage = null) {
         if (current?.name === name) return;
         closeDoc();
         const owner = { name, pdf: null, pages: [], events: null, blocks: {} };
@@ -446,7 +482,7 @@
                 `<div class="pdf-page" data-page="${p}" data-aspect="${aspect}"><div class="overlay-layer"></div></div>`).join('');
             $('page-total').textContent = owner.pdf.numPages;
             fitPages();
-            scrollToPage(app.state.positions?.[name] ?? info.pages[0]);
+            scrollToPage(info.pages.includes(startPage) ? startPage : (app.state.positions?.[name] ?? info.pages[0]));
             reportPosition();
             connectEvents();
         } catch (e) {
@@ -457,6 +493,7 @@
         if (!current) return;
         current.events?.close();
         current.pdf?.destroy();
+        settledPage = null;
         pagesBox.innerHTML = '';
         setStatus('');
         current = null;
@@ -477,6 +514,12 @@
             if (!current?.pages.length) return;
             const page = currentPage();
             $('page-input').value = page + 1;
+            settledPage = page;
+            [page - 1, page, page + 1].forEach((p) => { const holder = holderOf(p); if (holder) ensureOcrLayer(holder); });
+            if (holdPosition === current.name) {  // 引用跳轉：不改記住的位置，只讓細翻跟著目前頁
+                api(`${docApi(current.name)}/focus`, { page }).catch(() => {});
+                return;
+            }
             if (lastReported === `${current.name}:${page}`) return;
             lastReported = `${current.name}:${page}`;
             app.state.positions = { ...app.state.positions, [current.name]: page };
@@ -542,7 +585,11 @@
 
     async function pageData(page) {
         const owner = current;
-        if (!owner.blocks[page]) owner.blocks[page] = api(`${docApi(owner.name)}/pages/${page}`);
+        if (!owner.blocks[page]) {
+            // 失敗不記住，下次再試；否則這一頁之後按 Ctrl 都沒有反應
+            owner.blocks[page] = api(`${docApi(owner.name)}/pages/${page}`)
+                .catch((e) => { delete owner.blocks[page]; throw e; });
+        }
         return owner.blocks[page];
     }
     async function pageBlocks(page) { return (await pageData(page)).blocks; }
@@ -592,10 +639,20 @@
     }
     async function toggleParagraph() {
         if (!current?.pages.length) return;
-        const hit = await blockAtPoint(mouse.x, mouse.y);
+        // 掃描頁第一次要 OCR，可能等好幾秒，先讓使用者知道有在處理
+        const slow = setTimeout(() => notify('正在辨識這一頁的文字（掃描頁需要 OCR，約幾秒）…'), 600);
+        let hit;
+        try {
+            hit = await blockAtPoint(mouse.x, mouse.y);
+        } catch (e) {
+            notify(`無法取得這一頁的文字：${e.message}`);
+            return;
+        } finally {
+            clearTimeout(slow);
+        }
         if (!hit) {
             const page = holderAtMouse()?.dataset.page;
-            if (page !== undefined && !(await pageBlocks(Number(page))).length) notify('這一頁沒有可翻譯的文字層，細翻完成後才看得到譯文');
+            if (page !== undefined && !(await pageBlocks(Number(page))).length) notify('這一頁找不到可翻譯的段落，細翻完成後才看得到譯文');
             return;
         }
         const { block, holder } = hit;
@@ -791,12 +848,97 @@
         }
     });
 
-    // ---------- 啟動：回到上次的檔案 ----------
+    // ---------- 引用跳轉：/?doc=<文件名稱>&page=<1 起算>&bbox=x0,y0,x1,y1 ----------
+    // bbox 單位是 point，相對 PyMuPDF 的 page.rect，原點在左上角；換成頁面比例畫在 overlay 上。
+    // 跳轉後的位置不寫回記住的閱讀位置，直到使用者自己捲動、點擊或按鍵。
+    let holdPosition = null;  // 暫停記錄位置的文件名稱
+    ['wheel', 'mousedown', 'touchstart'].forEach((type) =>
+        viewer.addEventListener(type, () => { holdPosition = null; }, { passive: true }));
+    document.addEventListener('keydown', (e) => {
+        if (!['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) holdPosition = null;
+        if (e.key === 'Escape') citationBox.remove();
+    });
+
+    const citationBox = document.createElement('div');
+    citationBox.className = 'citation-box';
+    citationBox.innerHTML = '<button class="tool" type="button" title="清除標示（Esc）">×</button>';
+    citationBox.firstChild.addEventListener('mousedown', (e) => e.stopPropagation());
+    citationBox.firstChild.addEventListener('click', () => citationBox.remove());
+
+    function readJump() {
+        const params = new URLSearchParams(location.search);
+        if (!params.has('doc') && !params.has('pdf')) return null;
+        history.replaceState(null, '', location.pathname);  // 重新整理時不再跳一次
+        return { name: params.get('doc'), pdf: params.get('pdf'), page: params.get('page'), bbox: params.get('bbox') };
+    }
+    // ?pdf=<完整路徑>：已在書庫就直接跳；在開啟過的資料夾內但還沒加入時，先問使用者
+    async function jumpToPdf(jump) {
+        let check;
+        try {
+            check = await api(`/api/check-pdf?path=${encodeURIComponent(jump.pdf)}`);
+        } catch (e) { notify(`無法檢查檔案：${e.message}`); return; }
+        if (!check.allowed) { notify('不能加入這個檔案（必須是已開啟資料夾內的 PDF）'); return; }
+        if (check.in_library) { await jumpTo({ ...jump, name: check.name }); return; }
+        const parts = jump.pdf.split(/[\\/]/);
+        $('add-file').textContent = parts[parts.length - 1];
+        $('add-path').textContent = jump.pdf;
+        $('add-modal').hidden = false;
+        const confirmed = await new Promise((resolve) => {
+            $('add-confirm').onclick = () => resolve(true);
+            $('add-cancel').onclick = () => resolve(false);
+        });
+        $('add-modal').hidden = true;
+        if (!confirmed) return;
+        try {
+            const { name } = await api('/api/docs', { path: jump.pdf });
+            await refresh();
+            await jumpTo({ ...jump, name });
+        } catch (e) { notify(e.message); }
+    }
+    function parseBbox(text) {
+        if (!text) return null;
+        const values = text.split(',').map(Number);
+        const valid = values.length === 4 && values.every(Number.isFinite) && values[2] > values[0] && values[3] > values[1];
+        return valid ? values : undefined;
+    }
+    async function jumpTo({ name, page, bbox }) {
+        const doc = app.docs.find((d) => d.name === name);
+        if (!doc?.has_pdf) { notify(doc ? '找不到這份文件的 PDF' : '找不到文件'); return; }
+        const index = Number(page) - 1;
+        holdPosition = name;
+        if (current?.name !== name) {
+            keepOpen(name);
+            saveWorkspace();
+            await openDoc(name, index);
+        }
+        if (current?.name !== name || !current.pages.length) return;
+        if (!Number.isInteger(index) || !current.pages.includes(index)) { notify('頁碼超出範圍'); return; }
+        scrollToPage(index);
+        const box = parseBbox(bbox);
+        if (box === undefined) { notify('框的座標格式錯誤，只捲到該頁'); return; }
+        if (box) await markCitation(index, box);
+    }
+    async function markCitation(index, [x0, y0, x1, y1]) {
+        const view = (await current.pdf.getPage(index + 1)).getViewport({ scale: 1 });
+        if (x0 < -1 || y0 < -1 || x1 > view.width + 1 || y1 > view.height + 1) { notify('框超出頁面範圍，只捲到該頁'); return; }
+        Object.assign(citationBox.style, {
+            left: `${x0 / view.width * 100}%`, top: `${y0 / view.height * 100}%`,
+            width: `${(x1 - x0) / view.width * 100}%`, height: `${(y1 - y0) / view.height * 100}%`,
+        });
+        const holder = holderOf(index);
+        holder.querySelector('.overlay-layer').append(citationBox);
+        // 框放在視窗上方 1/3 處，這也是判斷目前頁的位置
+        viewer.scrollTop = holder.offsetTop + holder.clientHeight * (y0 / view.height) - viewer.clientHeight / 3;
+    }
+
+    // ---------- 啟動：網址指定位置時跳過去，否則回到上次的檔案 ----------
     (async () => {
         await refresh();
         await loadFolders();
         zoom = app.state.zoom || 1;
         $('zoom-label').textContent = `${Math.round(zoom * 100)}%`;
+        const jump = readJump();
+        if (jump) { await (jump.name ? jumpTo(jump) : jumpToPdf(jump)); return; }  // 兩者都有時以 doc 為準
         if (app.docs.some((d) => d.name === app.state.last && d.has_pdf)) {
             keepOpen(app.state.last);  // 上次從資料夾開的文件也要出現在清單
             saveWorkspace();

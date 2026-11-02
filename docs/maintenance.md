@@ -17,6 +17,7 @@
 | 解析引擎 | `convert.make_parser`、`MineruService`（`_start` 鎖定本機模式）、`MarkerService`、`_image_pdf`、`clean_mineru` |
 | 分段載入與跳過 | `DocSession._convert_chunk`、`_load_chunk`、`skipped`；設定 `chunk_timeout_minutes`、`marker_idle_minutes` |
 | 每頁文字與座標 | `rough.page_blocks`（路由 `/api/docs/<名稱>/pages/<頁>`），過濾規則 `_is_translatable` |
+| 掃描頁 OCR | `rough.page_blocks`（`ocr_dir`、回傳 `ocr_lines`）、`_cached_ocr`、`_ocr_lines`、`_layout_regions`、`_region_of`、`_group_lines`、`_split_paragraphs`；`LAYOUT_PRIORITY`、`LAYOUT_SKIP`、`OCR_DPI`、`OCR_LINE_GAP`、`OCR_INDENT`、`OCR_SHORT_LINE`、`OCR_FRAGMENT`；`app._ocr_dir`；前端 `ensureOcrLayer`（`settledPage`）、`renderOcrLayer`、`pageData`（失敗不快取） |
 | 粗翻與每月上限 | `rough.translate`、`library.reserve_chars`、設定 `monthly_chars` |
 | 粗翻用語修正 | `rough._apply_aliases`，讀 `glossary.json` 的 `aliases` |
 | 段落翻譯路由 | `POST /api/docs/<名稱>/translate`：先查細翻，再粗翻 |
@@ -39,6 +40,7 @@ SSE 事件（`/api/docs/<名稱>/events`）：`fine`（page）、`progress`（do
 | 功能 | 位置 |
 |---|---|
 | 側邊欄與輪詢 | `renderSidebar`（`sideView`：files／history）、`refresh` |
+| 引用跳轉（網址參數） | `readJump`、`jumpTo`、`jumpToPdf`、`markCitation`、`parseBbox`、`holdPosition`；路由 `/api/check-pdf`；`openDoc(name, startPage)`；CSS `.citation-box` |
 | 設定選單與翻譯設置 | `showFlyout`、`renderSettings`、`saveSettings`、`loadModels`、`currentMode` |
 | 資料夾樹（次級資料夾預設收合） | `folderTree`、`treeRows` |
 | 刪除流程 | `startDelete`、`delete-next`、`delete-confirm` |

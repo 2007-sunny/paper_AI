@@ -151,6 +151,19 @@ __CSS__
         </div>
     </div>
 
+    <div class="modal-backdrop" id="add-modal" hidden>
+        <div class="modal delete-modal">
+            <h3>要把這份 PDF 加入書庫嗎？</h3>
+            <p>引用連結指向一份還沒加入書庫的檔案。加入後會在這裡開到引用的位置。</p>
+            <p class="delete-title" id="add-file"></p>
+            <p class="doc-note" id="add-path"></p>
+            <div class="row">
+                <button class="tool primary" id="add-confirm">加入並開啟</button>
+                <button class="tool" id="add-cancel">取消</button>
+            </div>
+        </div>
+    </div>
+
     <div class="notice" id="notice" hidden></div>
 
     <script>

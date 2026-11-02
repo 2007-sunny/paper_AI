@@ -1,4 +1,4 @@
-# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261103
 """PDF → Markdown：依閱讀位置分段呼叫常駐的解析引擎。
 
 優先用 MinerU（.venv-mineru，本機服務），沒有安裝時用 Marker（marker_server.py）。
@@ -251,6 +251,8 @@ class MineruService:
                         if attempt == START_ATTEMPTS - 1:
                             raise
                         time.sleep(START_RETRY_SECONDS)
+                        # MinerU 服務是全機共用的；另一個 PaperAI（例如測試用的 8001）啟動時會把它停掉，所以重新啟動
+                        self._start()
                 self.last_used = time.time()
                 return clean_mineru(target.read_text(encoding="utf-8"))
 

@@ -1,4 +1,4 @@
-# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261103
 """PaperAI 本機服務：PDF 閱讀器、Ctrl 即時粗翻、本機細翻、單字查詢與問 Claude。
 
 啟動：python server.py（會自動開啟瀏覽器），或 uvicorn server:app --host 127.0.0.1 --port 8000
@@ -6,6 +6,7 @@
 import asyncio
 import html
 import json
+import os
 import re
 import subprocess
 from contextlib import asynccontextmanager
@@ -49,6 +50,10 @@ async def reject_cross_site_writes(request: Request, call_next):
         if origin not in (None, f"http://{request.headers.get('host', '')}"):
             return JSONResponse({"detail": "不允許的來源"}, status_code=403)
     return await call_next(request)
+
+
+def _ocr_dir(name: str) -> str:
+    return str(config.Doc(name).output_dir / "ocr")
 
 
 def _pdf(name: str) -> Path:
@@ -141,6 +146,33 @@ def folder_files(path: str):
         raise HTTPException(404, f"找不到資料夾：{path}")
     sources = library.list_sources()
     return {"pdfs": [{**p, "name": library.doc_name(p["path"], sources)} for p in library.folder_pdfs(path)]}
+
+
+@app.get("/api/check-pdf")
+def check_pdf(path: str):
+    """引用跳轉的 ?pdf=：只檢查路徑，不讀 PDF 內容。允許的是開啟過的資料夾內、實際存在的 .pdf。"""
+    denied = {"allowed": False, "in_library": False, "name": None}
+    raw = Path(path.strip().strip('"'))
+    if not path.strip() or ".." in raw.parts:
+        return denied
+    try:
+        target = raw.resolve(strict=True)  # 也展開符號連結，避免繞出資料夾
+    except (OSError, RuntimeError):
+        return denied
+    if not target.is_file() or target.suffix.lower() != ".pdf":
+        return denied
+    folders = []
+    for folder in library.load_state()["folders"]:
+        try:
+            folders.append(Path(folder).resolve(strict=True))
+        except (OSError, RuntimeError):
+            continue
+    if not any(folder in target.parents for folder in folders):
+        return denied
+    key = os.path.normcase(str(target))
+    name = next((n for n, s in library.list_sources().items()
+                 if not s["pages"] and os.path.normcase(s["pdf_path"]) == key), None)
+    return {"allowed": True, "in_library": name is not None, "name": name}
 
 
 class PickRequest(BaseModel):
@@ -237,7 +269,7 @@ def doc_pdf(name: str):
 @app.get("/api/docs/{name}/pages/{page}")
 def doc_page(name: str, page: int):
     try:
-        return rough.page_blocks(str(_pdf(name)), page)
+        return rough.page_blocks(str(_pdf(name)), page, _ocr_dir(name))
     except IndexError:
         raise HTTPException(404, "沒有這一頁")
 
@@ -256,7 +288,7 @@ class TranslateRequest(BaseModel):
 
 
 def _block_text(name: str, page: int, block_id: str) -> str:
-    blocks = rough.page_blocks(str(_pdf(name)), page)["blocks"]
+    blocks = rough.page_blocks(str(_pdf(name)), page, _ocr_dir(name))["blocks"]
     block = next((b for b in blocks if b["id"] == block_id), None)
     if block is None:
         raise HTTPException(404, "找不到這個段落")
