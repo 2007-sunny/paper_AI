@@ -10,7 +10,7 @@ PDF 閱讀器只有一個入口：本機服務 server.py（paperai/app.py + sess
 ## 路徑與設定
 - 生成結果放在 output/{BASE_NAME}/，書庫資料庫為 output/library.db，皆不提交 Git。PDF 可放在任何位置，書庫只記錄路徑。
 - 路徑一律由 paperai/config.py 計算（PROJECT_ROOT、Doc），不得寫死使用者電腦路徑。
-- 模型、thinking、num_ctx 等設定在 paperai/config.py；預設 gemma4:latest（名稱須與 ollama list 一致，不加 ollama/ 前綴）。閱讀器的「翻譯設置」可調整的項目存在 library.db，預設值是 config.ADVANCED_DEFAULTS；程式取模型用 llm.active_model，不要直接讀 config.MODEL_NAME。
+- 模型、thinking、num_ctx 等設定在 paperai/config.py；預設 gemma4:latest（名稱須與 ollama list 一致，不加 ollama/ 前綴）。閱讀器的「設置」可調整的項目存在 library.db，預設值是 config.ADVANCED_DEFAULTS；程式取模型用 llm.active_model，不要直接讀 config.MODEL_NAME。
 - 術語表兩層：output/{BASE_NAME}/{BASE_NAME}_glossary.json（自動生成，可手改）與專案根目錄 glossary.json（跨文件、優先；aliases 也會套用到粗翻）。
 - Google 金鑰放在根目錄 .env 的 GOOGLE_TRANSLATE_API_KEY（不提交 Git，不要寫進程式或貼到對話）；每月上限的預設值是 config.ROUGH_MONTHLY_CHARS。
 - 細翻快取 {BASE_NAME}_translation_cache_v2.json 的 key 包含提示詞版本、模型、句子與本段術語；改提示詞時遞增 translator.PROMPT_VERSION。
@@ -20,6 +20,7 @@ PDF 閱讀器只有一個入口：本機服務 server.py（paperai/app.py + sess
 
 ## 執行（從根目錄）
 python server.py [--no-browser] [--port 8000]
+pythonw server.py --no-browser   # 背景啟動（沒有主控台），輸出寫到 output/server.log
 python tools/bench_models.py --input "<名稱>.md" --models <模型...>
 python experiments/analyze_v4.py
 

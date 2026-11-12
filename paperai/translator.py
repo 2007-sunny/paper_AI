@@ -1,4 +1,4 @@
-# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261103
 """逐句翻譯：送入編號英文句子，以 JSON schema 要求回傳等長譯文陣列。
 
 對齊在翻譯時就成立；模型回傳句數不符時重試一次，仍失敗則整段翻譯並標記 aligned=False。
@@ -101,6 +101,11 @@ _REPEAT_RE = re.compile(r"(\S.{0,39}?)(?:\s*\1){5,}")
 # 模型對使用者說話，而不是翻譯（「根據您的指令…更正後的輸出（僅包含 JSON）」）
 _META_RE = re.compile(r"您的指令|根據您的|更正後的輸出|以下是(?:翻譯|譯文)|譯文如下")
 FAILED_TEXT = "（本段翻譯失敗，請參考原文）"
+# 模型偶爾原樣交回英文（G05_08 第 7 頁）；英文字母至少這麼多、中文字少於字母數的這個比例就算沒翻
+UNTRANSLATED_MIN_LETTERS = 40
+UNTRANSLATED_CJK_RATIO = 0.05
+_LATIN_RE = re.compile(r"[A-Za-z]")
+_CJK_RE = re.compile(r"[一-鿿]")
 
 
 def translation_problem(en: str, zh: str):
@@ -186,15 +191,24 @@ def source_hash(items: list) -> str:
     return hashlib.md5("\n".join(items).encode("utf-8")).hexdigest()[:12]
 
 
+def untranslated(zh: str) -> bool:
+    """模型沒翻、原樣交回英文：英文字母很多，中文字卻幾乎沒有。"""
+    latin = len(_LATIN_RE.findall(zh))
+    return latin >= UNTRANSLATED_MIN_LETTERS and len(_CJK_RE.findall(zh)) < latin * UNTRANSLATED_CJK_RATIO
+
+
 def cached_is_valid(sentences: list, cached: dict) -> bool:
-    """快取中的譯文可否沿用；失控輸出與翻譯失敗的區塊都要重翻。"""
+    """快取中的譯文可否沿用；失控輸出、翻譯失敗與沒翻成中文的區塊都要重翻。"""
     zh = [_repair_control_chars(z) for z in cached.get("zh") or []]
-    return _usable(sentences if cached.get("aligned") else [" ".join(sentences)], zh) and FAILED_TEXT not in zh
+    return (_usable(sentences if cached.get("aligned") else [" ".join(sentences)], zh)
+            and FAILED_TEXT not in zh and not untranslated(" ".join(zh)))
 
 
 def units_are_valid(units: list) -> bool:
-    """已存入 knowledge JSON 的區塊可否沿用；重新開啟文件時，失控或失敗的區塊會重新翻譯。"""
-    return not any(u["zh"] == FAILED_TEXT or translation_problem(u["en"], u["zh"]) for unit in units for u in unit)
+    """已存入 knowledge JSON 的區塊可否沿用；重新開啟文件時，失控、失敗或沒翻成中文的區塊會重新翻譯。"""
+    if any(u["zh"] == FAILED_TEXT or translation_problem(u["en"], u["zh"]) for unit in units for u in unit):
+        return False
+    return not untranslated(" ".join(u["zh"] for unit in units for u in unit))
 
 
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*:?-{3,}:?\s*$")

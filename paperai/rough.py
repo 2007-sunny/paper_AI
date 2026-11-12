@@ -1,4 +1,4 @@
-# 最後修改：Claude Opus 5.5（PaperAI 維護），20261102
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261103
 """粗翻：PyMuPDF 直接取 PDF 的文字與座標，按下 Ctrl 時才送 Google Cloud Translation（Basic v2）。
 
 不經過 Marker，加入檔案後立即可用；翻過的段落存在 library.db，同一段不會重複計費。
@@ -45,6 +45,9 @@ _FF_RE = re.compile(r"(?<=[A-Za-z])↵(?=[A-Za-z])")  # 同一種字型問題：
 _MATH_RE = re.compile(r"\S*[Ͱ-Ͽ∀-⋿=<>^_]\S*")
 _WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _NUMBER_RE = re.compile(r"\b\d[\d.]*\b")
+_SENTENCE_RE = re.compile(r"[a-z)\]]\. +[A-Z(]")  # 小寫字結尾的句號接下一句；目錄的「1. Ion」「II. Detector」不算
+_PAGE_REF_RE = re.compile(r"\(\d{2,4}\)")       # 章節摘要裡的頁碼，例如 Wave equation (174)
+PROSE_MIN_WORDS = 15
 
 
 class RoughUnavailable(Exception):
@@ -75,9 +78,18 @@ def _clean(text: str) -> str:
 
 
 def _is_translatable(text: str) -> bool:
-    """略過頁碼、純公式與目錄（目錄的章節編號和頁碼送翻譯會被打亂）。"""
+    """略過頁碼、純公式與目錄（目錄的章節編號和頁碼送翻譯會被打亂）。
+
+    數字多的段落通常是目錄或數據表，但實驗報告的內文也常滿是數值（2.08–2.38 MHz），
+    所以有完整句子的長段落仍然保留；章節摘要那種一連串「(173)」的頁碼仍算目錄。
+    """
     words = len(_WORD_RE.findall(text))
-    return words >= 3 and len(_NUMBER_RE.findall(text)) < words * 0.25
+    if words < 3:
+        return False
+    if len(_NUMBER_RE.findall(text)) < words * 0.25:
+        return True
+    sentences = len(_SENTENCE_RE.findall(text)) + text.rstrip().endswith(".")
+    return words >= PROSE_MIN_WORDS and sentences >= 1 and len(_PAGE_REF_RE.findall(text)) < 3
 
 
 @lru_cache(maxsize=512)

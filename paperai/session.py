@@ -1,4 +1,4 @@
-# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261103
 """本機服務的背景工作：文件工作階段、分段轉檔、細翻排程與事件推送。
 
 單一 Worker 執行緒處理所有 GPU 工作，而且只處理有人正在閱讀的文件：
@@ -19,7 +19,7 @@ from .llm import save_json_atomic, unload_model
 from .pages import _block_text, _words, assign_pages, word_list
 from .pipeline import build_knowledge, prepare, restore_translations
 from .rough import fix_font
-from .translator import TranslationCache, translate_block
+from .translator import TranslationCache, translate_block, untranslated
 
 SAVE_INTERVAL = 5.0     # 翻譯中最多每幾秒寫回一次 knowledge JSON
 ERROR_BACKOFF = 30.0    # 模型呼叫失敗後暫停幾秒再試（例如 Ollama 沒開）
@@ -38,6 +38,7 @@ class DocSession:
         self.whole = library.doc_converted(name)  # 分段轉檔之前的文件有完整的 Markdown
         self.chunks = set()
         self.skipped = set()  # 解析逾時的分段，這次服務不再重試，維持粗翻
+        self.retried = set()  # 細翻沒翻成中文、已重翻過一次的區塊
         self.blocks, self.by_id, self.order, self.originals, self.pending = [], {}, [], {}, set()
         self.focus = []
         self.requests = []  # ctrl 模式等待處理的 (頁碼, 段落文字)；文字為空表示只需要解析這一頁
@@ -111,10 +112,22 @@ class DocSession:
         return best
 
     def fine_translation(self, page: int, text: str):
+        """有細翻就回傳；模型原樣交回英文時當作沒有，改顯示粗翻，並重新細翻一次。"""
         with self.lock:
             best = self._match_block(page, text)
-            if best:
-                return "\n\n".join(" ".join(s["zh"] for s in unit) for unit in best["units"])
+            if not best:
+                return None
+            zh = "\n\n".join(" ".join(s["zh"] for s in unit) for unit in best["units"])
+            if not untranslated(zh):
+                return zh
+            bid = best["id"]
+            if bid not in self.retried:  # 每段只重試一次，避免模型一直交回英文時反覆佔用 GPU
+                self.retried.add(bid)
+                best.clear()
+                best.update(copy.deepcopy(self.originals[bid]))
+                self.pending.add(bid)
+                if self.mode == "ctrl" and (page, text) not in self.requests:
+                    self.requests.append((page, text))
         return None
 
     def _source_text(self, block: dict) -> str:

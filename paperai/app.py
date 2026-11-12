@@ -11,6 +11,7 @@ import re
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import ollama
 from fastapi import FastAPI, HTTPException, Request
@@ -98,6 +99,8 @@ class SettingsRequest(BaseModel):
     monthly_chars: int | None = Field(None, ge=0, le=config.ROUGH_MAX_CHARS)
     marker_idle_minutes: int | None = Field(None, ge=1, le=60)
     chunk_timeout_minutes: int | None = Field(None, ge=1, le=30)
+    zoom_sensitivity: int | None = Field(None, ge=5, le=200)
+    zoom_settle_ms: int | None = Field(None, ge=50, le=1000)
 
 
 def _check_mode(mode: str) -> None:
@@ -248,6 +251,131 @@ def save_doc_mode(name: str, req: DocModeRequest):
     return settings
 
 
+ANNOTATION_COLORS = ("yellow", "green", "blue", "red")
+
+
+class AnnotationRequest(BaseModel):
+    page: int = Field(ge=0)
+    rects: list[list[float]] = Field(min_length=1, max_length=200)
+    text: str = Field("", max_length=5000)
+    color: str = "yellow"
+    note: str = Field("", max_length=5000)
+    kind: Literal["text", "box"] = "text"
+
+
+class AnnotationUpdate(BaseModel):
+    color: str | None = None
+    note: str | None = Field(None, max_length=5000)
+
+
+def _check_color(color):
+    if color is not None and color not in ANNOTATION_COLORS:
+        raise HTTPException(400, f"不支援的顏色：{color}")
+
+
+@app.get("/api/docs/{name}/annotations")
+def doc_annotations(name: str):
+    _known_doc(name)
+    return {"annotations": library.list_annotations(name)}
+
+
+@app.post("/api/docs/{name}/annotations")
+def add_annotation(name: str, req: AnnotationRequest):
+    """標記與註解只存在書庫，不寫回 PDF。"""
+    _known_doc(name)
+    _check_color(req.color)
+    if any(len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1] for rect in req.rects):
+        raise HTTPException(400, "標記範圍格式錯誤")
+    return library.add_annotation(name, req.page, req.rects, req.text, req.color, req.note, req.kind)
+
+
+@app.patch("/api/annotations/{annotation_id}")
+def update_annotation(annotation_id: int, req: AnnotationUpdate):
+    _check_color(req.color)
+    result = library.update_annotation(annotation_id, req.color, req.note)
+    if result is None:
+        raise HTTPException(404, "找不到這個標記")
+    return result
+
+
+@app.delete("/api/annotations/{annotation_id}")
+def delete_annotation(annotation_id: int):
+    if not library.delete_annotation(annotation_id):
+        raise HTTPException(404, "找不到這個標記")
+    return {"ok": True}
+
+
+class BookmarkRequest(BaseModel):
+    page: int = Field(ge=0)
+    y: float = Field(0, ge=0, le=1)  # 書籤位置在該頁的高度比例
+    title: str = Field("", max_length=200)
+
+
+class BookmarkUpdate(BaseModel):
+    title: str = Field(max_length=200)
+
+
+@app.get("/api/docs/{name}/bookmarks")
+def doc_bookmarks(name: str):
+    _known_doc(name)
+    return {"bookmarks": library.list_bookmarks(name)}
+
+
+@app.post("/api/docs/{name}/bookmarks")
+def add_bookmark(name: str, req: BookmarkRequest):
+    """自己加的書籤，和標記一樣只存在書庫。PDF 內建的目錄由前端用 PDF.js 讀，不經過這裡。"""
+    _known_doc(name)
+    return library.add_bookmark(name, req.page, req.y, req.title.strip() or f"第 {req.page + 1} 頁")
+
+
+@app.patch("/api/bookmarks/{bookmark_id}")
+def rename_bookmark(bookmark_id: int, req: BookmarkUpdate):
+    result = library.rename_bookmark(bookmark_id, req.title.strip())
+    if result is None:
+        raise HTTPException(404, "找不到這個書籤")
+    return result
+
+
+class OutlineItem(BaseModel):
+    title: str = Field(max_length=300)
+    depth: int = Field(ge=0, le=10)
+    page: int | None = Field(None, ge=0)
+    y: float = Field(0, ge=0, le=1)
+
+
+class OutlineRequest(BaseModel):
+    items: list[OutlineItem] = Field(max_length=3000)
+
+
+@app.get("/api/docs/{name}/outline")
+def doc_outline(name: str):
+    """自訂目錄；None 表示沒編輯過，前端改用 PDF 內建目錄。"""
+    _known_doc(name)
+    return {"items": library.get_outline(name)}
+
+
+@app.put("/api/docs/{name}/outline")
+def save_outline(name: str, req: OutlineRequest):
+    """編輯過的目錄整份覆寫，只存在書庫，不寫回 PDF。"""
+    _known_doc(name)
+    library.save_outline(name, [item.model_dump() for item in req.items])
+    return {"ok": True}
+
+
+@app.delete("/api/docs/{name}/outline")
+def reset_outline(name: str):
+    _known_doc(name)
+    library.reset_outline(name)
+    return {"ok": True}
+
+
+@app.delete("/api/bookmarks/{bookmark_id}")
+def delete_bookmark(bookmark_id: int):
+    if not library.delete_bookmark(bookmark_id):
+        raise HTTPException(404, "找不到這個書籤")
+    return {"ok": True}
+
+
 @app.get("/api/docs/{name}/info")
 def doc_info(name: str):
     import fitz
@@ -285,6 +413,7 @@ def doc_figure(name: str, page: int, index: int):
 class TranslateRequest(BaseModel):
     page: int
     block: str
+    source: str = "auto"  # auto：有細翻用細翻；rough、fine：Shift+Ctrl 指定其中一種
 
 
 def _block_text(name: str, page: int, block_id: str) -> str:
@@ -300,11 +429,16 @@ def translate_paragraph(name: str, req: TranslateRequest):
     """按下 Ctrl 時呼叫：有細翻就用細翻，否則即時粗翻。"""
     text = _block_text(name, req.page, req.block)
     session = worker.session(name)
-    fine = session.fine_translation(req.page, text)
+    fine = session.fine_translation(req.page, text) if req.source != "rough" else None
     if fine:
         return {"html": render_markdown(fine), "source": "fine"}
-    session.request_fine(req.page, text)
-    worker.notify()
+    if req.source == "fine":
+        session.request_fine(req.page, text)
+        worker.notify()
+        raise HTTPException(404, "這一段還沒有細翻，已排入細翻")
+    if req.source == "auto":
+        session.request_fine(req.page, text)
+        worker.notify()
     try:
         return {"html": f"<p>{html.escape(rough.translate(text))}</p>", "source": "rough"}
     except rough.QuotaExceeded as e:

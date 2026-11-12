@@ -1,7 +1,7 @@
-# 最後修改：Claude Opus 5.5（PaperAI 維護），20261101
-"""書庫：PDF 來源紀錄、閱讀狀態與粗翻快取，存在 output/library.db（SQLite）。
+# 最後修改：Claude Opus 5.5（PaperAI 維護），20261103
+"""書庫：PDF 來源紀錄、閱讀狀態、粗翻快取與標記註解，存在 output/library.db（SQLite）。
 
-PDF 不需要複製到專案內；書庫只記錄路徑。
+PDF 不需要複製到專案內；書庫只記錄路徑。標記與註解也只存在這裡，不寫回 PDF。
 """
 import hashlib
 import json
@@ -29,7 +29,17 @@ def _connect():
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS rough_cache (hash TEXT PRIMARY KEY, zh TEXT);
         CREATE TABLE IF NOT EXISTS rough_usage (month TEXT PRIMARY KEY, chars INTEGER);
+        CREATE TABLE IF NOT EXISTS annotations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, doc TEXT, page INTEGER, rects TEXT,
+            text TEXT, color TEXT, note TEXT, created_at TEXT, updated_at TEXT);
+        CREATE INDEX IF NOT EXISTS annotations_doc ON annotations (doc, page);
+        CREATE TABLE IF NOT EXISTS bookmarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, doc TEXT, page INTEGER, y REAL, title TEXT, created_at TEXT);
+        CREATE TABLE IF NOT EXISTS outlines (doc TEXT PRIMARY KEY, items TEXT, updated_at TEXT);
     """)
+    # kind：text 是選字標記，box 是手動框選（沒有文字層的頁面也能用）；舊資料庫補欄位
+    if "kind" not in {r["name"] for r in conn.execute("PRAGMA table_info(annotations)")}:
+        conn.execute("ALTER TABLE annotations ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
     return conn
 
 
@@ -219,6 +229,91 @@ def list_documents() -> list:
             "has_pdf": source_pdf(name) is not None,
         })
     return sorted(docs, key=lambda d: d["title"].lower())
+
+
+# ---------- 標記與註解 ----------
+# rects 是 [[x0, y0, x1, y1], ...]，單位 point，相對 PyMuPDF 的 page.rect（與引用跳轉的 bbox 相同）
+
+def _annotation(row) -> dict:
+    return {**dict(row), "rects": json.loads(row["rects"])}
+
+
+def list_annotations(doc: str) -> list:
+    with _lock, _connect() as conn:
+        rows = conn.execute("SELECT * FROM annotations WHERE doc = ? ORDER BY page, id", (doc,)).fetchall()
+    return [_annotation(r) for r in rows]
+
+
+def add_annotation(doc: str, page: int, rects: list, text: str, color: str, note: str, kind: str = "text") -> dict:
+    now = _now()
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO annotations (doc, page, rects, text, color, note, kind, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (doc, page, json.dumps(rects), text, color, note, kind, now, now))
+        row = conn.execute("SELECT * FROM annotations WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return _annotation(row)
+
+
+def update_annotation(annotation_id: int, color: str = None, note: str = None):
+    with _lock, _connect() as conn:
+        if color is not None:
+            conn.execute("UPDATE annotations SET color = ?, updated_at = ? WHERE id = ?", (color, _now(), annotation_id))
+        if note is not None:
+            conn.execute("UPDATE annotations SET note = ?, updated_at = ? WHERE id = ?", (note, _now(), annotation_id))
+        row = conn.execute("SELECT * FROM annotations WHERE id = ?", (annotation_id,)).fetchone()
+    return _annotation(row) if row else None
+
+
+def delete_annotation(annotation_id: int) -> bool:
+    with _lock, _connect() as conn:
+        return conn.execute("DELETE FROM annotations WHERE id = ?", (annotation_id,)).rowcount > 0
+
+
+# ---------- 書籤 ----------
+# page 是 0 起算的 PDF 頁碼，y 是該頁的高度比例（0 = 頁頂）
+
+def list_bookmarks(doc: str) -> list:
+    with _lock, _connect() as conn:
+        rows = conn.execute("SELECT * FROM bookmarks WHERE doc = ? ORDER BY page, y, id", (doc,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_bookmark(doc: str, page: int, y: float, title: str) -> dict:
+    with _lock, _connect() as conn:
+        cur = conn.execute("INSERT INTO bookmarks (doc, page, y, title, created_at) VALUES (?, ?, ?, ?, ?)",
+                           (doc, page, y, title, _now()))
+        return dict(conn.execute("SELECT * FROM bookmarks WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+
+def rename_bookmark(bookmark_id: int, title: str):
+    with _lock, _connect() as conn:
+        conn.execute("UPDATE bookmarks SET title = ? WHERE id = ?", (title, bookmark_id))
+        row = conn.execute("SELECT * FROM bookmarks WHERE id = ?", (bookmark_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def delete_bookmark(bookmark_id: int) -> bool:
+    with _lock, _connect() as conn:
+        return conn.execute("DELETE FROM bookmarks WHERE id = ?", (bookmark_id,)).rowcount > 0
+
+
+# ---------- 自訂目錄 ----------
+# 使用者編輯過的目錄整份存成一列：[{title, depth, page, y}, ...]，依顯示順序。沒有這一列時前端用 PDF 內建目錄
+
+def get_outline(doc: str):
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT items FROM outlines WHERE doc = ?", (doc,)).fetchone()
+    return json.loads(row["items"]) if row else None
+
+
+def save_outline(doc: str, items: list) -> None:
+    with _lock, _connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO outlines VALUES (?, ?, ?)", (doc, json.dumps(items, ensure_ascii=False), _now()))
+
+
+def reset_outline(doc: str) -> None:
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM outlines WHERE doc = ?", (doc,))
 
 
 # ---------- 刪除翻譯資料（永遠不動原始 PDF） ----------

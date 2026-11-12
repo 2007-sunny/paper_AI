@@ -21,7 +21,7 @@
 | 粗翻與每月上限 | `rough.translate`、`library.reserve_chars`、設定 `monthly_chars` |
 | 粗翻用語修正 | `rough._apply_aliases`，讀 `glossary.json` 的 `aliases` |
 | 段落翻譯路由 | `POST /api/docs/<名稱>/translate`：先查細翻，再粗翻 |
-| 粗細翻對應 | `DocSession.fine_translation`、`_match_block`（`MATCH_PARAGRAPH`、`MATCH_BLOCK`） |
+| 粗細翻對應 | `DocSession.fine_translation`（`retried`）、`_match_block`（`MATCH_PARAGRAPH`、`MATCH_BLOCK`）；沒翻成中文：`translator.untranslated`；切換：前端 `switchSource`、`fillOverlay(el, page, source)`、`/translate` 的 `source` |
 | 翻譯設定 | `library.translation_settings`、`save_translation_settings`、`save_doc_mode`、`fine_mode`；路由 `/api/settings`、`/api/models`、`/api/docs/<名稱>/mode`；預設值 `config.ADVANCED_DEFAULTS` |
 | 細翻模式排程 | `DocSession._next_step`（`_focus_step`、`_request_step`、`request_fine`）；`Worker.settings_changed`、`parser.cancel`、`llm.unload_model` |
 | 背景排程優先順序 | `session.Worker._next` |
@@ -41,7 +41,10 @@ SSE 事件（`/api/docs/<名稱>/events`）：`fine`（page）、`progress`（do
 |---|---|
 | 側邊欄與輪詢 | `renderSidebar`（`sideView`：files／history）、`refresh` |
 | 引用跳轉（網址參數） | `readJump`、`jumpTo`、`jumpToPdf`、`markCitation`、`parseBbox`、`holdPosition`；路由 `/api/check-pdf`；`openDoc(name, startPage)`；CSS `.citation-box` |
-| 設定選單與翻譯設置 | `showFlyout`、`renderSettings`、`saveSettings`、`loadModels`、`currentMode` |
+| 縮放與渲染 | 前端 `fitPages`（批次寫入、保持 1/3 判斷線位置）、`renderPage`（`renderGen`／`renderTask` 取消舊渲染）、`setZoom`（按鈕，0.1 一階）、滾輪／觸控板縮放的 wheel 處理與 `commitPinch`（手勢中 CSS scale，結束才重排）、`fitOverlay`（二分搜尋放得進框的最大字級，上下限依頁高，不用區塊行數）、`lazy` 觀察器 |
+| 書籤與目錄 | `library.list_bookmarks`、`add_bookmark`、`rename_bookmark`、`delete_bookmark`；路由 `/api/docs/<名稱>/bookmarks`、`/api/bookmarks/<id>`；前端 `loadBookmarks`、`loadOutline`、`bookmarkRows`、`outlineRows`、`addBookmark`、`scrollToSpot`；自訂目錄 `library.get_outline`、`save_outline`、`reset_outline`，路由 `/api/docs/<名稱>/outline`，前端 `linkOutline`、`saveOutline`、`editOutline`、`insertOutline`、`outlineHead` |
+| 標記與註解 | `library.list_annotations`、`add_annotation`、`update_annotation`、`delete_annotation`；路由 `/api/docs/<名稱>/annotations`、`/api/annotations/<id>`；前端 `loadAnnotations`、`renderAnnotations`、`selectionRects`、`createAnnotations`、框選的 `setDrawing`／`textInBox`、`showAnnotationMenu`、`annotationRows` |
+| 設定選單與設置 | `showFlyout`、`renderSettings`、`saveSettings`、`loadModels`、`currentMode` |
 | 資料夾樹（次級資料夾預設收合） | `folderTree`、`treeRows` |
 | 刪除流程 | `startDelete`、`delete-next`、`delete-confirm` |
 | PDF 顯示與文字層 | `openDoc`、`renderPage`、`fitPages`（PDF.js 3.11 由 cdnjs 載入） |

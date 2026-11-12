@@ -27,6 +27,8 @@ ADVANCED_DEFAULTS = {
     "monthly_chars": ROUGH_MONTHLY_CHARS,
     "marker_idle_minutes": 5,       # Marker 閒置多久後關閉以釋放 VRAM
     "chunk_timeout_minutes": 4,     # 一段超過這個時間就放棄，公式密集的頁面可能要十分鐘以上
+    "zoom_sensitivity": 22,         # 觸控板／Ctrl+滾輪縮放：倍率乘上 exp(-deltaY × 值 / 10000)
+    "zoom_settle_ms": 200,          # 縮放手勢停下多久後才重排、重畫成清晰頁面
 }
 
 

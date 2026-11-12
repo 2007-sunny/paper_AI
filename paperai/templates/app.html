@@ -19,7 +19,7 @@ __CSS__
     <aside class="sidebar" id="sidebar">
         <div class="history-head" id="history-head" hidden>
             <button class="tool" id="history-back">← 返回</button>
-            <strong>歷史管理</strong>
+            <strong id="side-title">歷史管理</strong>
         </div>
         <div class="side-actions" id="file-actions">
             <button class="tool" id="open-file">開啟檔案</button>
@@ -31,7 +31,8 @@ __CSS__
                 <button class="gear" id="settings-button" aria-label="設定" aria-haspopup="menu" aria-expanded="false">⚙</button>
                 <div class="settings-flyout" id="settings-flyout" role="menu" hidden>
                     <button role="menuitem" id="open-history">歷史管理</button>
-                    <button role="menuitem" id="open-translation">翻譯設置</button>
+                    <button role="menuitem" id="open-annotations">註解列表</button>
+                    <button role="menuitem" id="open-translation">設置</button>
                 </div>
             </div>
             <span id="usage"></span>
@@ -44,6 +45,8 @@ __CSS__
             <span class="doc-title" id="doc-title"></span>
             <span class="status" id="status"></span>
             <span class="pager"><input id="page-input" inputmode="numeric" aria-label="頁碼"> / <span id="page-total">—</span></span>
+            <button class="tool" id="open-bookmarks" title="書籤與目錄">書籤</button>
+            <button class="tool" id="draw-box" title="框選註解：在頁面上拖曳畫出方框（Esc 結束）">▭ 框選</button>
             <button class="tool" id="zoom-out" title="縮小">−</button>
             <button class="tool" id="zoom-label" title="符合寬度">100%</button>
             <button class="tool" id="zoom-in" title="放大">＋</button>
@@ -56,7 +59,7 @@ __CSS__
 
     <section class="settings-panel" id="settings-panel" hidden>
         <div class="lookup-head">
-            <strong>翻譯設置</strong>
+            <strong>設置</strong>
             <button class="tool" id="settings-close" aria-label="關閉">×</button>
         </div>
         <div class="setting">
@@ -80,6 +83,12 @@ __CSS__
             <span class="setting-name">粗翻用量</span>
             <p class="setting-value" id="usage-detail"></p>
         </div>
+        <div class="setting">
+            <span class="setting-name">縮放</span>
+            <label class="setting-row">觸控板與 Ctrl+滾輪靈敏度<input id="set-zoom-speed" type="number" min="5" max="200"></label>
+            <label class="setting-row">停下多久後重畫清晰頁面（毫秒）<input id="set-zoom-settle" type="number" min="50" max="1000"></label>
+            <p class="doc-note">靈敏度越大縮放越快（預設 22）。重畫等待越短越快變清晰，但手勢中途停頓時也會重畫，大文件可能稍微頓一下。</p>
+        </div>
         <details class="advanced">
             <summary>進階</summary>
             <label class="setting-row">預先細翻頁數
@@ -97,6 +106,24 @@ __CSS__
     <div class="selection-menu" id="selection-menu" hidden>
         <button id="menu-lookup">查詢</button>
         <button id="menu-ask">擷取內容</button>
+        <span class="menu-colors" id="menu-colors">
+            <button data-color="yellow" title="黃色標記"></button>
+            <button data-color="green" title="綠色標記"></button>
+            <button data-color="blue" title="藍色標記"></button>
+            <button data-color="red" title="紅色標記"></button>
+        </span>
+        <button id="menu-note">註解</button>
+    </div>
+
+    <div class="selection-menu" id="annot-menu" hidden>
+        <span class="menu-colors" id="annot-colors">
+            <button data-color="yellow" title="改成黃色"></button>
+            <button data-color="green" title="改成綠色"></button>
+            <button data-color="blue" title="改成藍色"></button>
+            <button data-color="red" title="改成紅色"></button>
+        </span>
+        <button id="annot-edit">註解</button>
+        <button id="annot-delete">刪除</button>
     </div>
 
     <section class="lookup" id="lookup" hidden>
@@ -147,6 +174,18 @@ __CSS__
                 <button class="tool" id="delete-next">下一步</button>
                 <button class="tool danger" id="delete-confirm" hidden>確認永久刪除</button>
                 <button class="tool" id="delete-cancel">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="note-modal" hidden>
+        <div class="modal delete-modal">
+            <h3>註解</h3>
+            <p class="doc-note note-quote" id="note-quote"></p>
+            <textarea id="note-text" rows="5" placeholder="寫下你的註解"></textarea>
+            <div class="row">
+                <button class="tool primary" id="note-save">儲存</button>
+                <button class="tool" id="note-cancel">取消</button>
             </div>
         </div>
     </div>

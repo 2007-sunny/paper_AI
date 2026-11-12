@@ -73,6 +73,46 @@ body.side-closed .sidebar { display: none; }
 .figure-box .tool { position: absolute; top: 6px; right: 6px; pointer-events: auto; opacity: .3; transition: opacity .12s; }
 .figure-box .tool:hover { opacity: 1; }
 
+.annot-layer { position: absolute; inset: 0; pointer-events: none; }
+.annot-mark { position: absolute; mix-blend-mode: multiply; opacity: .4; border-radius: 2px; }
+.annot-mark.flash { outline: 2px solid #e8590c; opacity: .6; }
+.annot-mark[data-color="yellow"], .menu-colors [data-color="yellow"] { background: #ffd43b; }
+.annot-mark[data-color="green"], .menu-colors [data-color="green"] { background: #69db7c; }
+.annot-mark[data-color="blue"], .menu-colors [data-color="blue"] { background: #74c0fc; }
+.annot-mark[data-color="red"], .menu-colors [data-color="red"] { background: #ff8787; }
+.annot-mark.box { opacity: 1; mix-blend-mode: normal; border: 2px solid; border-radius: 0; background: none !important; }
+.annot-mark.box[data-color="yellow"] { border-color: #f59f00; }
+.annot-mark.box[data-color="green"] { border-color: #2f9e44; }
+.annot-mark.box[data-color="blue"] { border-color: #1c7ed6; }
+.annot-mark.box[data-color="red"] { border-color: #e03131; }
+.viewer.drawing .pdf-page { cursor: crosshair; }
+.viewer.drawing .textLayer, .viewer.drawing .textLayer span { pointer-events: none; cursor: crosshair; }
+.annot-draft { position: absolute; z-index: 5; pointer-events: none; border: 2px dashed #f59f00; background: rgba(255, 212, 59, .12); }
+.annot-badge { position: absolute; pointer-events: auto; transform: translate(4px, -50%); padding: 0 5px; border: 0; border-radius: 8px; background: #f59f00; color: #fff; font: 11px/1.6 var(--font); cursor: pointer; }
+.menu-colors { display: flex; align-items: center; gap: 4px; padding: 0 6px; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+.selection-menu .menu-colors button { width: 16px; height: 16px; padding: 0; border-radius: 50%; border: 1px solid rgba(0, 0, 0, .25); }
+.selection-menu .menu-colors button:hover { outline: 2px solid var(--accent); background-blend-mode: normal; }
+.note-quote { max-height: 6em; overflow: hidden; }
+.side-section { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin: 10px 0 4px; padding: 0 9px; }
+.side-section .tool { padding: 1px 7px; font-size: 12px; }
+.outline-toggle { flex: none; width: 16px; padding: 5px 0 0; border: 0; background: none; color: var(--muted); font: inherit; cursor: pointer; }
+.doc-item > .doc-note { float: right; margin-left: 6px; }
+.outline-tools { display: flex; gap: 4px; }
+.outline-edit { align-items: center; }
+.outline-edit .doc-action { opacity: 1; padding: 3px 4px; }
+.outline-input { flex: 1; min-width: 0; margin: 1px 2px; padding: 2px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); font: inherit; }
+.outline-input:focus { border-color: var(--accent); outline: none; }
+.bookmark-input { flex: 1; min-width: 0; margin: 2px 6px; padding: 3px 6px; border: 1px solid var(--accent); border-radius: 4px; background: var(--bg); color: var(--text); font: inherit; }
+.annot-row { display: block; width: 100%; padding: 6px 9px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.annot-row:hover { background: var(--bg); }
+.annot-row .annot-dot[data-color="yellow"] { background: #ffd43b; }
+.annot-row .annot-dot[data-color="green"] { background: #69db7c; }
+.annot-row .annot-dot[data-color="blue"] { background: #74c0fc; }
+.annot-row .annot-dot[data-color="red"] { background: #ff8787; }
+.annot-row .annot-dot { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%; }
+.annot-row .annot-text { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.annot-row .annot-note { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
 .citation-box { position: absolute; pointer-events: none; outline: 2px solid #e8590c; outline-offset: 1px; background: rgba(232, 89, 12, .08); }
 .citation-box .tool { position: absolute; top: -14px; right: -14px; padding: 0 6px; pointer-events: auto; line-height: 1.4; }
 
