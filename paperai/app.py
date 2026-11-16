@@ -57,6 +57,10 @@ def _ocr_dir(name: str) -> str:
     return str(config.Doc(name).output_dir / "ocr")
 
 
+def _page_blocks(name: str, page: int) -> dict:
+    return rough.page_blocks(str(_pdf(name)), page, _ocr_dir(name))
+
+
 def _pdf(name: str) -> Path:
     pdf = library.source_pdf(name)
     if not pdf:
@@ -101,6 +105,8 @@ class SettingsRequest(BaseModel):
     chunk_timeout_minutes: int | None = Field(None, ge=1, le=30)
     zoom_sensitivity: int | None = Field(None, ge=5, le=200)
     zoom_settle_ms: int | None = Field(None, ge=50, le=1000)
+    overlay_font_max: int | None = Field(None, ge=10, le=80)
+    overlay_font_min: int | None = Field(None, ge=6, le=24)
 
 
 def _check_mode(mode: str) -> None:
@@ -251,6 +257,23 @@ def save_doc_mode(name: str, req: DocModeRequest):
     return settings
 
 
+@app.post("/api/docs/{name}/rebuild-ocr")
+def rebuild_ocr(name: str):
+    """重新 OCR 掃描頁並覆蓋原始 PDF 的文字層（使用者在設置按兩次才會呼叫）。
+
+    這是唯一會改動原始 PDF 的地方：第一次覆蓋前原檔備份到 output/<名稱>/original/。
+    """
+    _known_doc(name)
+    pdf = _pdf(name)
+    backup = config.Doc(name).output_dir / "original" / pdf.name
+    try:
+        return rough.rebuild_text_layer(str(pdf), _ocr_dir(name), backup)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except PermissionError:
+        raise HTTPException(409, "PDF 正在被其他程式使用（例如在別的閱讀器開著），關閉後再試；原檔沒有被改動")
+
+
 ANNOTATION_COLORS = ("yellow", "green", "blue", "red")
 
 
@@ -382,10 +405,14 @@ def doc_info(name: str):
     pdf = fitz.open(_pdf(name))
     try:
         total = len(pdf)
+        pages = _page_indices(normalize_pages(next((d["pages"] for d in library.list_documents() if d["name"] == name), "")), total)
+        # 每頁的寬高比：不能全部用第一頁的。封面或某幾頁大小不同時，頁框被拉成錯的比例，
+        # 畫面圖片跟著變形、文字層卻是真實尺寸，選字與譯文框越往頁底偏越多（Schroeder 第 135 頁偏半行）
+        aspects = {p: round(pdf[p].rect.width / pdf[p].rect.height, 5) for p in pages}
     finally:
         pdf.close()
-    pages = next((d["pages"] for d in library.list_documents() if d["name"] == name), "")
-    return {"name": name, "pages": _page_indices(normalize_pages(pages), total)}
+    # version：PDF 修改時間，前端加在 source.pdf 網址後，重新製作 OCR 後才不會讀到瀏覽器快取的舊檔
+    return {"name": name, "pages": pages, "aspects": aspects, "version": int(_pdf(name).stat().st_mtime)}
 
 
 @app.get("/api/docs/{name}/source.pdf")
@@ -397,7 +424,7 @@ def doc_pdf(name: str):
 @app.get("/api/docs/{name}/pages/{page}")
 def doc_page(name: str, page: int):
     try:
-        return rough.page_blocks(str(_pdf(name)), page, _ocr_dir(name))
+        return _page_blocks(name, page)
     except IndexError:
         raise HTTPException(404, "沒有這一頁")
 
@@ -417,7 +444,7 @@ class TranslateRequest(BaseModel):
 
 
 def _block_text(name: str, page: int, block_id: str) -> str:
-    blocks = rough.page_blocks(str(_pdf(name)), page, _ocr_dir(name))["blocks"]
+    blocks = _page_blocks(name, page)["blocks"]
     block = next((b for b in blocks if b["id"] == block_id), None)
     if block is None:
         raise HTTPException(404, "找不到這個段落")
@@ -496,13 +523,15 @@ def _sse(msg: dict) -> str:
 class ExtractRequest(BaseModel):
     pages: list[int]
     text: str
+    context: str = Field("", max_length=50000)  # 滑鼠所在的 PDF 段落；只選幾個字時用來找區塊
+    whole: bool = False                          # True：交回整段，不裁到選取範圍
 
 
 @app.post("/api/docs/{name}/extract")
 def extract_content(name: str, req: ExtractRequest):
     """選取範圍的原文與 LaTeX 公式，取代截圖；不呼叫任何 API。"""
     _pdf(name)
-    result = worker.session(name).extract(req.pages[:20], req.text[:50000])
+    result = worker.session(name).extract(req.pages[:20], req.text[:50000], req.context, req.whole)
     worker.notify()
     return {**result, "html": render_markdown(result["markdown"])}
 

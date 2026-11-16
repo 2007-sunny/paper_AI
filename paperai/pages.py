@@ -109,7 +109,11 @@ def assign_pages(blocks: list, meta_path, pdf_path=None, pages: list = None) -> 
                 candidates = [p for p in pages if current < p <= current + LOOKAHEAD]
                 # 分數相同時取較近的頁；只有明顯比目前頁更符合才換頁（常見單字到處都有）
                 best_score, best_page = max(((score(p), -p) for p in candidates), default=(0, -current))
-                if best_score >= MATCH_THRESHOLD and best_score > stay + 0.1:
+                # 書眉（PHYSICAL REVIEW LETTERS）在後面每一頁都有，不能拿來換頁：current 只會往後走，
+                # 被推到後面之後的區塊再也回不來（Linsay 第 1 頁的內文全被推到重疊頁而丟掉）
+                # 書眉很短、而且在好幾頁幾乎完全符合；一般段落只是常用字重疊，不算
+                running_header = len(words) <= 8 and sum(score(p) >= 0.9 for p in candidates) >= 3
+                if best_score >= MATCH_THRESHOLD and best_score > stay + 0.1 and not running_header:
                     page = -best_page
         if page is not None and page >= current:
             current = page

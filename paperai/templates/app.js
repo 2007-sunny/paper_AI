@@ -1,5 +1,8 @@
 (() => {
     const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+    // 沒內嵌的中日韓字型（例如重新製作 OCR 時的 china-t、不少中文 PDF）要字元對照表才讀得出文字；
+    // cdnjs 沒有提供 cmaps（403），改用 jsDelivr 上同一版的 pdfjs-dist
+    const PDF_OPTIONS = { cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/', cMapPacked: true };
     const $ = (id) => document.getElementById(id);
     const viewer = $('viewer');
     const pagesBox = $('pages');
@@ -40,6 +43,7 @@
     let current = null;  // { name, pdf, pages, events }
 
     let sideView = 'files';
+    let ocrArmed = null, ocrRunning = false;  // 「重新製作 OCR」按鈕：等待第二次確認的文件、正在辨識中
     let folderFiles = {};  // 資料夾路徑 → PDF 清單
     let collapsed = new Set();  // 收合的開啟資料夾（預設展開）
     let expanded = new Set();   // 展開的次級資料夾（預設收合，避免大型資料夾一次攤開）
@@ -224,7 +228,8 @@
     };
     const SETTING_INPUTS = { 'set-lookahead': 'lookahead', 'set-model': 'model', 'set-monthly': 'monthly_chars',
                              'set-idle': 'marker_idle_minutes', 'set-timeout': 'chunk_timeout_minutes',
-                             'set-zoom-speed': 'zoom_sensitivity', 'set-zoom-settle': 'zoom_settle_ms' };
+                             'set-zoom-speed': 'zoom_sensitivity', 'set-zoom-settle': 'zoom_settle_ms',
+                             'set-font-max': 'overlay_font_max', 'set-font-min': 'overlay_font_min' };
     function currentMode() {
         return app.settings.doc_modes[current?.name] ?? app.settings.fine_mode;
     }
@@ -236,6 +241,7 @@
         document.querySelector('#mode-scope [data-scope="doc"]').disabled = !current;
         $('mode-hint').textContent = MODE_HINTS[mode];
         $('scope-hint').textContent = current ? $('doc-title').textContent : '開啟文件後才能單獨設定。';
+        $('rebuild-ocr').disabled = !current?.pdf || ocrRunning;
         $('usage-detail').textContent = `本月 ${app.usage.toLocaleString()} / ${app.settings.monthly_chars.toLocaleString()} 字元`;
         Object.entries(SETTING_INPUTS).forEach(([id, key]) => {
             if (document.activeElement !== $(id)) $(id).value = app.settings[key];
@@ -246,6 +252,7 @@
             app.settings = await api(url, changes);
             lastReported = null;  // 重新回報目前頁，新的模式與預先頁數才會生效
             reportPosition();
+            if ('overlay_font_max' in changes || 'overlay_font_min' in changes) pagesBox.querySelectorAll('.overlay').forEach(fitOverlay);
         } catch (e) { notify(e.message); }
         renderSidebar();
     }
@@ -312,6 +319,36 @@
         saveSettings({ [key]: key === 'model' ? value : Number(value) });
     }));
     $('settings-reset').addEventListener('click', () => saveSettings({ ...app.defaults }));
+    // 重新製作 OCR 並覆蓋原始 PDF：會改動使用者的檔案，按兩次才執行；完成後重新開啟文件（閱讀位置會保留）
+    function setOcrButton(text, armed = false) {
+        $('rebuild-ocr').textContent = text;
+        $('rebuild-ocr').classList.toggle('armed', armed);
+    }
+    $('rebuild-ocr').addEventListener('click', async () => {
+        if (!current?.pdf || ocrRunning) return;
+        const name = current.name;
+        if (ocrArmed !== name) {
+            ocrArmed = name;
+            setOcrButton(`確定覆蓋？再按一次（約 ${Math.ceil(current.pdf.numPages * 3 / 60)} 分鐘內）`, true);
+            setTimeout(() => { if (ocrArmed === name && !ocrRunning) { ocrArmed = null; setOcrButton('重新製作 OCR 並覆蓋原始 PDF'); } }, 4000);
+            return;
+        }
+        ocrArmed = null;
+        ocrRunning = true;
+        $('rebuild-ocr').disabled = true;
+        setOcrButton('辨識中…（請不要關閉）');
+        try {
+            const res = await api(`${docApi(name)}/rebuild-ocr`, {});
+            if (current?.name === name) {
+                closeDoc();
+                await openDoc(name);
+            }
+            notify(`已重新製作 ${res.rebuilt} 頁的文字層${res.skipped ? `（${res.skipped} 頁不是掃描頁，保留原文字）` : ''}；原檔備份在 output 資料夾`);
+        } catch (e) { notify(`沒有覆蓋：${e.message}`); }
+        ocrRunning = false;
+        $('rebuild-ocr').disabled = false;
+        setOcrButton('重新製作 OCR 並覆蓋原始 PDF');
+    });
 
     // ---------- 刪除翻譯：預覽 → 說明 → 確認 ----------
     let deleting = null;
@@ -329,7 +366,7 @@
         if (!doc.has_pdf) return;
         try {
             await ensurePdfJs();
-            const pdf = await pdfjsLib.getDocument(`${docApi(name)}/source.pdf`).promise;
+            const pdf = await pdfjsLib.getDocument({ url: `${docApi(name)}/source.pdf`, ...PDF_OPTIONS }).promise;
             const info = await api(`${docApi(name)}/info`);
             const page = await pdf.getPage(info.pages[0] + 1);
             const viewport = page.getViewport({ scale: 1 });
@@ -474,15 +511,22 @@
         layer.className = 'textLayer ocr-text';
         holder.querySelector('.textLayer').after(layer);
         const width = holder.clientWidth, height = holder.clientHeight;
+        // 逐字放（pieces：單字帶空格、寬度到下一個字的開頭）；整行拉寬時行中間的字會偏半個字母，選字對不準。
+        // 先全部放進去再一次量寬度，逐個量會每個字都強迫重算版面
+        const spans = [];
         lines.forEach((line) => {
-            const span = document.createElement('span');
-            span.textContent = line.text;
-            Object.assign(span.style, { left: `${line.left}%`, top: `${line.top}%`,
-                                        fontSize: `${line.height / 100 * height * 0.85}px` });
-            layer.append(span, document.createElement('br'));
-            const natural = span.getBoundingClientRect().width;
-            if (natural) span.style.transform = `scaleX(${line.width / 100 * width / natural})`;
+            (line.pieces?.length ? line.pieces : [{ text: line.text, left: line.left, width: line.width }]).forEach((piece) => {
+                const span = document.createElement('span');
+                span.textContent = piece.text;
+                Object.assign(span.style, { left: `${piece.left}%`, top: `${line.top}%`,
+                                            fontSize: `${line.height / 100 * height * 0.85}px` });
+                layer.append(span);
+                spans.push([span, piece.width / 100 * width]);
+            });
+            layer.append(document.createElement('br'));
         });
+        const naturals = spans.map(([span]) => span.getBoundingClientRect().width);
+        spans.forEach(([span, target], i) => { if (naturals[i]) span.style.transform = `scaleX(${target / naturals[i]})`; });
     }
 
     const lazy = new IntersectionObserver((entries) => {
@@ -522,13 +566,16 @@
         try {
             await ensurePdfJs();
             const info = await api(`${docApi(name)}/info`);
-            owner.pdf = await pdfjsLib.getDocument(`${docApi(name)}/source.pdf`).promise;
+            // ?v= 是 PDF 的修改時間：重新製作 OCR 覆蓋原檔後，瀏覽器不會拿快取的舊檔
+            owner.pdf = await pdfjsLib.getDocument({ url: `${docApi(name)}/source.pdf?v=${info.version}`, ...PDF_OPTIONS }).promise;
             if (current !== owner) { owner.pdf.destroy(); return; }
             owner.pages = info.pages;
+            // 每頁用自己的寬高比（伺服器用 PyMuPDF 讀，整本幾百頁也只要幾十毫秒）；舊服務沒有 aspects 時退回第一頁
             const first = (await owner.pdf.getPage(info.pages[0] + 1)).getViewport({ scale: 1 });
-            const aspect = first.width / first.height;
+            const fallback = first.width / first.height;
+            const aspectOf = (p) => info.aspects?.[p] || fallback;
             pagesBox.innerHTML = info.pages.map((p) =>
-                `<div class="pdf-page" data-page="${p}" data-aspect="${aspect}"><div class="annot-layer"></div><div class="overlay-layer"></div></div>`).join('');
+                `<div class="pdf-page" data-page="${p}" data-aspect="${aspectOf(p)}"><div class="annot-layer"></div><div class="overlay-layer"></div></div>`).join('');
             $('page-total').textContent = owner.pdf.numPages;
             pagesBox.querySelectorAll('.pdf-page').forEach((holder) => lazy.observe(holder));
             fitPages();
@@ -665,24 +712,34 @@
         return block ? { block, holder } : null;
     }
 
-    const MIN_FONT = 10;
     // 譯文字級：放得進框的最大值，讓譯文填滿框（中文通常比英文短）。不用區塊的行數估字級：
     // 舊掃描 PDF 的 PyMuPDF 會把一行拆成好幾段，摘要 6 行報成 21 行，估出來的字太小。
-    // 上下限都跟著頁高走，放大縮小時譯文和框等比例變化
+    // 上限是頁高的千分比，跟著縮放；上下限在「設置」的譯文字級調整（overlay_font_max／overlay_font_min）
     function fitOverlay(el) {
         const pageHeight = el.closest('.pdf-page').clientHeight;
+        const { overlay_font_max: maxPermille = 35, overlay_font_min: minPx = 10 } = app.settings || {};
+        // 量的時候先關掉捲軸：overflow-y:auto 在試到太大的字級時會長出捲軸，之後試較小的字級，
+        // 捲軸不一定馬上消失，內文被擠窄、多出一行，結果選到放不下的字級（Linsay 第 1 頁 0_6）
+        el.style.overflowY = 'hidden';
         const fits = (size) => { el.style.fontSize = `${size}px`; return el.scrollHeight <= el.clientHeight; };
-        let hi = Math.min(el.clientHeight, pageHeight * 0.035);  // 大框裡只有幾個字時，也不超過頁高 3.5%
-        let lo = Math.min(MIN_FONT, pageHeight * 0.008);  // 縮得很小時也要能縮進框裡，不出捲軸
-        if (fits(hi)) return;
-        if (!fits(lo)) return;  // 最小字級也放不下：維持最小字級，讓框可以捲動
-        // 二分搜尋（精度為字級的 2%）；每量一次都要重算版面，所以不逐步縮小
-        const step = Math.max(lo * 0.02, 0.25);
-        while (hi - lo > step) {
-            const mid = (lo + hi) / 2;
-            if (fits(mid)) lo = mid; else hi = mid;
+        const min = minPx * Math.min(1, zoom);  // 縮小頁面時下限跟著降，譯文才縮得進框裡、不出捲軸
+        let lo = min, hi = Math.max(min, Math.min(el.clientHeight, pageHeight * maxPermille / 1000));
+        let size = hi;
+        if (!fits(hi)) {
+            if (fits(lo)) {
+                // 二分搜尋（精度為字級的 2%）；每量一次都要重算版面，所以不逐步縮小
+                const step = Math.max(lo * 0.02, 0.25);
+                while (hi - lo > step) {
+                    const mid = (lo + hi) / 2;
+                    if (fits(mid)) lo = mid; else hi = mid;
+                }
+            }
+            size = lo;  // 最小字級也放不下時維持最小字級，讓框可以捲動
+            el.style.fontSize = `${size}px`;
         }
-        el.style.fontSize = `${lo}px`;
+        el.style.overflowY = '';
+        // 恢復 auto 後若因小數點誤差又放不下，再縮 3%，避免剛好多出捲軸
+        if (size > min && el.scrollHeight > el.clientHeight) el.style.fontSize = `${Math.max(min, size * 0.97)}px`;
     }
     async function fillOverlay(el, page, source = 'auto') {
         try {
@@ -1429,20 +1486,27 @@
     });
     $('lookup-close').addEventListener('click', () => { lookupId++; $('lookup').hidden = true; });
 
-    // 只選幾個字時擷取整段；公式在 Marker 解析完才有 LaTeX，先給 PDF 文字，解析好再換掉
+    // 預設擷取整段；按「只擷取選取的部分」由伺服器把解析結果裁到選取範圍。
+    // 公式在解析完才有 LaTeX，先給 PDF 文字，解析好再換掉
     let askTimer = null;
+    let askWhole = false;
     async function loadExtract(owner) {
-        const text = picked.text.length < 40 ? (picked.context || picked.text) : picked.text;
+        clearTimeout(askTimer);
+        $('ask-whole').textContent = askWhole ? '只擷取選取的部分' : '擷取整段';
         try {
-            const res = await api(`${docApi(owner)}/extract`, { pages: picked.pages, text });
+            const res = await api(`${docApi(owner)}/extract`,
+                { pages: picked.pages, text: picked.text, context: picked.context, whole: askWhole });
             if ($('ask-modal').hidden) return;
             if (res.markdown) {
                 $('ask-text').value = res.markdown;
                 $('ask-preview').innerHTML = res.html;
                 window.MathJax?.typesetPromise?.([$('ask-preview')]);
-                $('ask-note').textContent = '公式已是 LaTeX，貼到 AI 就能讀。可以直接修改下面的內容。';
+                $('ask-note').textContent = askWhole || res.trimmed
+                    ? '公式已是 LaTeX，貼到 AI 就能讀。可以直接修改下面的內容。'
+                    : '對不準選取的範圍，先給整段；公式已是 LaTeX。';
                 return;
             }
+            $('ask-text').value = askWhole ? (picked.context || picked.text) : picked.text;
             $('ask-note').textContent = res.waiting ? '這幾頁正在解析，完成後公式會自動換成 LaTeX；目前是 PDF 文字。'
                 : '這段找不到解析結果，目前是 PDF 文字，公式可能失真。';
             if (res.waiting) askTimer = setTimeout(() => loadExtract(owner), 3000);
@@ -1450,9 +1514,16 @@
             $('ask-note').textContent = e.message;
         }
     }
+    $('ask-whole').addEventListener('click', () => {
+        if (!current) return;
+        askWhole = !askWhole;
+        $('ask-preview').innerHTML = '';
+        loadExtract(current.name);
+    });
     $('menu-ask').addEventListener('click', () => {
         menu.hidden = true;
-        $('ask-text').value = picked.text.length < 40 ? (picked.context || picked.text) : picked.text;
+        askWhole = true;  // 預設整段（使用者偏好）；按「只擷取選取的部分」才裁到選取範圍
+        $('ask-text').value = picked.context || picked.text;
         $('ask-preview').innerHTML = '';
         $('ask-answer').innerHTML = '';
         $('ask-input').value = '';

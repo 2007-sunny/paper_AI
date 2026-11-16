@@ -21,7 +21,8 @@
 | 粗翻與每月上限 | `rough.translate`、`library.reserve_chars`、設定 `monthly_chars` |
 | 粗翻用語修正 | `rough._apply_aliases`，讀 `glossary.json` 的 `aliases` |
 | 段落翻譯路由 | `POST /api/docs/<名稱>/translate`：先查細翻，再粗翻 |
-| 粗細翻對應 | `DocSession.fine_translation`（`retried`）、`_match_block`（`MATCH_PARAGRAPH`、`MATCH_BLOCK`）；沒翻成中文：`translator.untranslated`；切換：前端 `switchSource`、`fillOverlay(el, page, source)`、`/translate` 的 `source` |
+| 擷取內容 | `DocSession.extract`（`context` 定位短選取、`whole`）、`_extract_blocks`、`_trim_to_selection`、`_md_words`；路由 `/api/docs/<名稱>/extract`；前端 `loadExtract`、`ask-whole` 按鈕（`askWhole` 預設 true＝整段） |
+| 粗細翻對應 | `DocSession.fine_translation`（`retried`）、`_match_blocks`（單一區塊：`MATCH_PARAGRAPH`、`MATCH_BLOCK`；連續區塊：`MATCH_RUN_BLOCK`、`RUN_TRIM`、`EDGE_ANCHOR`）、`_retry`；沒翻成中文：`translator.untranslated`；切換：前端 `switchSource`、`fillOverlay(el, page, source)`、`/translate` 的 `source` |
 | 翻譯設定 | `library.translation_settings`、`save_translation_settings`、`save_doc_mode`、`fine_mode`；路由 `/api/settings`、`/api/models`、`/api/docs/<名稱>/mode`；預設值 `config.ADVANCED_DEFAULTS` |
 | 細翻模式排程 | `DocSession._next_step`（`_focus_step`、`_request_step`、`request_fine`）；`Worker.settings_changed`、`parser.cancel`、`llm.unload_model` |
 | 背景排程優先順序 | `session.Worker._next` |
@@ -41,7 +42,8 @@ SSE 事件（`/api/docs/<名稱>/events`）：`fine`（page）、`progress`（do
 |---|---|
 | 側邊欄與輪詢 | `renderSidebar`（`sideView`：files／history）、`refresh` |
 | 引用跳轉（網址參數） | `readJump`、`jumpTo`、`jumpToPdf`、`markCitation`、`parseBbox`、`holdPosition`；路由 `/api/check-pdf`；`openDoc(name, startPage)`；CSS `.citation-box` |
-| 縮放與渲染 | 前端 `fitPages`（批次寫入、保持 1/3 判斷線位置）、`renderPage`（`renderGen`／`renderTask` 取消舊渲染）、`setZoom`（按鈕，0.1 一階）、滾輪／觸控板縮放的 wheel 處理與 `commitPinch`（手勢中 CSS scale，結束才重排）、`fitOverlay`（二分搜尋放得進框的最大字級，上下限依頁高，不用區塊行數）、`lazy` 觀察器 |
+| 縮放與渲染 | 前端 `fitPages`（批次寫入、保持 1/3 判斷線位置）、`renderPage`（`renderGen`／`renderTask` 取消舊渲染）、`setZoom`（按鈕，0.1 一階）、滾輪／觸控板縮放的 wheel 處理與 `commitPinch`（手勢中 CSS scale，結束才重排）、`fitOverlay`（二分搜尋放得進框的最大字級，上限為頁高千分比 `overlay_font_max`、下限 `overlay_font_min` px，不用區塊行數）、`lazy` 觀察器 |
+| 重新製作 OCR（覆蓋原始 PDF） | `rough.rebuild_text_layer`、`_is_scan`、`_reading_order`、`_line_pieces`、`_snap_words`（`SNAP_GAP`、`SNAP_RANGE`）、`_regroup_words`、`_rebuilt_pages`（`REBUILT_MARKER`）；前端 `renderOcrLayer`（逐字 pieces）、`PDF_OPTIONS`（cMapUrl）（`SCAN_IMAGE_COVER`、`REBUILD_MAX_PAGES`）；路由 `POST /api/docs/<名稱>/rebuild-ocr`；`/info` 的 `version`；前端 `rebuild-ocr` 按鈕（`ocrArmed`、`ocrRunning`） |
 | 書籤與目錄 | `library.list_bookmarks`、`add_bookmark`、`rename_bookmark`、`delete_bookmark`；路由 `/api/docs/<名稱>/bookmarks`、`/api/bookmarks/<id>`；前端 `loadBookmarks`、`loadOutline`、`bookmarkRows`、`outlineRows`、`addBookmark`、`scrollToSpot`；自訂目錄 `library.get_outline`、`save_outline`、`reset_outline`，路由 `/api/docs/<名稱>/outline`，前端 `linkOutline`、`saveOutline`、`editOutline`、`insertOutline`、`outlineHead` |
 | 標記與註解 | `library.list_annotations`、`add_annotation`、`update_annotation`、`delete_annotation`；路由 `/api/docs/<名稱>/annotations`、`/api/annotations/<id>`；前端 `loadAnnotations`、`renderAnnotations`、`selectionRects`、`createAnnotations`、框選的 `setDrawing`／`textInBox`、`showAnnotationMenu`、`annotationRows` |
 | 設定選單與設置 | `showFlyout`、`renderSettings`、`saveSettings`、`loadModels`、`currentMode` |

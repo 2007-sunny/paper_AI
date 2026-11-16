@@ -80,25 +80,39 @@ __CSS__
             <p class="doc-note" id="scope-hint"></p>
         </div>
         <div class="setting">
+            <span class="setting-name">文字來源（僅此文件）</span>
+            <button class="tool" id="rebuild-ocr">重新製作 OCR 並覆蓋原始 PDF</button>
+            <p class="doc-note" id="ocr-hint">舊期刊掃描檔內建的文字層常是破碎的舊 OCR（缺字、公式亂碼），粗翻和細翻都會受影響。這會重新辨識掃描頁，把新的文字寫進原始 PDF（每頁約 3 秒）；電子版頁面不動，第一次覆蓋前原檔會備份到 output 資料夾。</p>
+        </div>
+        <div class="setting">
             <span class="setting-name">粗翻用量</span>
             <p class="setting-value" id="usage-detail"></p>
         </div>
-        <div class="setting">
-            <span class="setting-name">縮放</span>
-            <label class="setting-row">觸控板與 Ctrl+滾輪靈敏度<input id="set-zoom-speed" type="number" min="5" max="200"></label>
-            <label class="setting-row">停下多久後重畫清晰頁面（毫秒）<input id="set-zoom-settle" type="number" min="50" max="1000"></label>
-            <p class="doc-note">靈敏度越大縮放越快（預設 22）。重畫等待越短越快變清晰，但手勢中途停頓時也會重畫，大文件可能稍微頓一下。</p>
-        </div>
         <details class="advanced">
             <summary>進階</summary>
-            <label class="setting-row">預先細翻頁數
-                <select id="set-lookahead"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select>
-            </label>
-            <label class="setting-row">本機模型<select id="set-model"></select></label>
-            <label class="setting-row">粗翻每月上限（字元）<input id="set-monthly" type="number" min="0" max="500000"></label>
-            <label class="setting-row">解析模型閒置後釋放 VRAM（分鐘）<input id="set-idle" type="number" min="1" max="60"></label>
-            <label class="setting-row">每段解析逾時（分鐘）<input id="set-timeout" type="number" min="1" max="30"></label>
-            <p class="doc-note">換模型只影響之後翻譯的段落，已完成的譯文不會重翻。</p>
+            <div class="advanced-group">
+                <span class="setting-name">縮放</span>
+                <label class="setting-row">觸控板與 Ctrl+滾輪靈敏度<input id="set-zoom-speed" type="number" min="5" max="200"></label>
+                <label class="setting-row">停下多久後重畫清晰頁面（毫秒）<input id="set-zoom-settle" type="number" min="50" max="1000"></label>
+                <p class="doc-note">靈敏度越大縮放越快（預設 22）。重畫等待越短越快變清晰，但手勢中途停頓時也會重畫，大文件可能稍微頓一下。</p>
+            </div>
+            <div class="advanced-group">
+                <span class="setting-name">譯文字級</span>
+                <label class="setting-row">最大字級（頁高的千分之幾）<input id="set-font-max" type="number" min="10" max="80"></label>
+                <label class="setting-row">最小字級（px）<input id="set-font-min" type="number" min="6" max="24"></label>
+                <p class="doc-note">譯文會用放得進框的最大字級，但不超過上限；上限跟著縮放一起變（預設 35）。想讓字小一點、框內留白，就調低上限。</p>
+            </div>
+            <div class="advanced-group">
+                <span class="setting-name">翻譯與解析</span>
+                <label class="setting-row">預先細翻頁數
+                    <select id="set-lookahead"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select>
+                </label>
+                <label class="setting-row">本機模型<select id="set-model"></select></label>
+                <label class="setting-row">粗翻每月上限（字元）<input id="set-monthly" type="number" min="0" max="500000"></label>
+                <label class="setting-row">解析模型閒置後釋放 VRAM（分鐘）<input id="set-idle" type="number" min="1" max="60"></label>
+                <label class="setting-row">每段解析逾時（分鐘）<input id="set-timeout" type="number" min="1" max="30"></label>
+                <p class="doc-note">換模型只影響之後翻譯的段落，已完成的譯文不會重翻。</p>
+            </div>
             <button class="tool" id="settings-reset">還原預設值</button>
         </details>
     </section>
@@ -144,6 +158,7 @@ __CSS__
             <div class="ask-preview" id="ask-preview"></div>
             <div class="row">
                 <button class="tool primary" id="ask-copy">複製</button>
+                <button class="tool" id="ask-whole">擷取整段</button>
                 <a class="tool" href="https://claude.ai/new" target="_blank" rel="noopener">開啟 Claude.ai ↗</a>
                 <button class="tool" id="ask-close">關閉</button>
             </div>

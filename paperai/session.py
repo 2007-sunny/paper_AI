@@ -8,9 +8,11 @@ ctrl 只處理按過 Ctrl 的段落；off 完全不用 GPU。
 """
 import copy
 import json
+import re
 import threading
 import time
 import traceback
+import unicodedata
 
 from . import config, library
 from .blocks import TRANSLATABLE_TYPES, parse_blocks
@@ -25,7 +27,76 @@ SAVE_INTERVAL = 5.0     # 翻譯中最多每幾秒寫回一次 knowledge JSON
 ERROR_BACKOFF = 30.0    # 模型呼叫失敗後暫停幾秒再試（例如 Ollama 沒開）
 MATCH_PARAGRAPH = 0.7   # PDF 段落的單字出現在 Marker 區塊的比例
 EDGE_WORDS = 8          # 擷取內容時，用選取開頭與結尾各幾個單字定位區塊
+_MD_MATH_RE = re.compile(r"\$\$.+?\$\$|\$[^$\n]+\$", re.S)
+_MD_CHUNK_RE = re.compile(r"\$\$.+?\$\$|\$[^$\n]+\$|\S+", re.S)  # 以空白分開的片段，公式算一段
+_LETTERS_RE = re.compile(r"[^\W\d_]+")
+
+
+def _md_words(md: str) -> list:
+    """Markdown 裡公式以外的單字與位置 [(單字, 開始, 結束)]；單字規則同 word_list。"""
+    masked = _MD_MATH_RE.sub(lambda m: " " * len(m.group()), md)
+    return [(w, m.start(), m.end()) for m in _LETTERS_RE.finditer(masked) for w in word_list(m.group())]
+
+
+def _trim_to_selection(md: str, text: str):
+    """把擷取到的整段 Markdown 裁到選取範圍；找不到選取的開頭或結尾時回傳 None（交回整段）。
+
+    PDF 文字和 Markdown 只有一般單字對得上（公式在 Markdown 是 LaTeX），所以先用前後幾個單字定位，
+    再依選取開頭／結尾在第一個與最後一個單字外面還有幾個片段（|Im|、τm、句點），往外多包幾個 Markdown 片段。
+    """
+    sel, spans = word_list(text), _md_words(md)
+    if not sel or not spans:
+        return None
+    words = [w for w, _, _ in spans]
+
+    def find(seq, near=None):
+        hits = [i for i in range(len(words) - len(seq) + 1) if words[i:i + len(seq)] == seq]
+        if not hits:
+            return None
+        return hits[0] if near is None else min(hits, key=lambda i: abs(i - near))
+
+    start = first = None
+    for skip in range(min(3, len(sel))):  # 開頭幾個字可能是換行斷字（volt-age），往後試
+        for k in [k for k in ((3, 2) if len(sel) - skip >= 2 else (1,)) if k <= len(sel) - skip]:
+            i = find(sel[skip:skip + k])
+            if i is not None:
+                start, first = i, sel[skip]
+                break
+        if start is not None:
+            break
+    end = last = None
+    for skip in range(min(3, len(sel))):
+        for k in [k for k in ((3, 2) if len(sel) - skip >= 2 else (1,)) if k <= len(sel) - skip]:
+            seq = sel[len(sel) - skip - k:len(sel) - skip]
+            i = find(seq, near=(start or 0) + len(sel) - skip - k)
+            if i is not None and (start is None or i + k - 1 >= start):
+                end, last = i + k - 1, seq[-1]
+                break
+        if end is not None:
+            break
+    if start is None or end is None or end < start:
+        return None
+    begin, finish = spans[start][1], spans[end][2]
+
+    flat = unicodedata.normalize("NFKC", text).lower()
+    hits_first = [m.start() for m in re.finditer(rf"(?<![a-z]){re.escape(first)}(?![a-z])", flat)]
+    hits_last = [m.end() for m in re.finditer(rf"(?<![a-z]){re.escape(last)}(?![a-z])", flat)]
+    head = flat[:hits_first[0]] if hits_first else ""
+    tail = flat[hits_last[-1]:] if hits_last else ""
+    if head.split():  # 選取從公式或短字開始（|Im| is the …）：往前多包同樣多個片段
+        before = list(_MD_CHUNK_RE.finditer(md[:begin]))
+        if before:
+            begin = before[-min(len(head.split()), len(before))].start()
+    if tail.strip():  # 選取以公式或標點結束（… and τm、used.）：往後多包
+        after = list(_MD_CHUNK_RE.finditer(md, finish))
+        n = len(tail.split()) or 1
+        if after:
+            finish = after[min(n, len(after)) - 1].end()
+    return md[begin:finish].strip()
 MATCH_BLOCK = 0.4       # Marker 區塊的單字出現在 PDF 段落的比例（跨欄段落只佔一部分）
+MATCH_RUN_BLOCK = 0.6   # 一段跨好幾個區塊時，每個區塊至少這麼多單字在段落裡，才算這段的一部分
+RUN_TRIM = 0.05         # 頭尾的區塊拿掉後涵蓋率下降不到這麼多，就不算這段的一部分
+EDGE_ANCHOR = 3         # 頭尾區塊的前（後）幾個單字和 PDF 段落相同，就是段落的開頭（結尾），不修剪
 
 
 class DocSession:
@@ -93,42 +164,112 @@ class DocSession:
         self._index(kept)
         self.chunks.add(start)
 
-    def _match_block(self, page: int, text: str, translated: bool = True):
-        """PDF 段落對應的區塊；Marker 的區塊和 PDF 段落切法不同，依單字重疊比對。"""
+    def _match_blocks(self, page: int, text: str, translated: bool = True) -> list:
+        """PDF 段落對應的區塊（依文件順序）；Marker／MinerU 的區塊和 PDF 段落切法不同，依單字重疊比對。
+
+        先找單一區塊；找不到時，PDF 段落可能跨好幾個區塊（中間夾公式、參考文獻在 PDF 合成一塊），
+        改找連續的區塊：每個區塊大部分單字都在段落裡，合起來涵蓋段落的大部分。中間的公式等不翻譯的區塊也一起回傳。
+        translated=True 時只回傳已全部細翻的結果。
+        """
         words = _words(text)
         if len(words) < 3:
-            return None
+            return []
+        near = [b for b in self.blocks if abs(b.get("page", -9) - page) <= 1]
         best, best_score = None, 0
-        for block in self.blocks:
-            if block["id"] not in self.originals or abs(block.get("page", -9) - page) > 1:
-                continue
-            if translated and "units" not in block:
+        for block in near:
+            if block["id"] not in self.originals or (translated and "units" not in block):
                 continue
             other = _words(_block_text(block))
             shared = len(words & other)
             coverage, precision = shared / len(words), shared / max(len(other), 1)
             if coverage >= MATCH_PARAGRAPH and precision >= MATCH_BLOCK and coverage + precision > best_score:
                 best, best_score = block, coverage + precision
+        if best:
+            return [best]
+
+        runs, run = [], []
+        for block in near:
+            if block["id"] not in self.originals:  # 公式、圖等：夾在中間不打斷
+                if run:
+                    run.append(block)
+                continue
+            other = _words(_block_text(block))
+            shared = len(words & other)
+            # 標題不併進段落（Arfken 5.2 節的標題字都出現在下一段裡）
+            if block["type"] != "heading" and shared >= 3 and shared / max(len(other), 1) >= MATCH_RUN_BLOCK:
+                run.append(block)
+            elif run:
+                runs.append(run)
+                run = []
+        if run:
+            runs.append(run)
+
+        def coverage(blocks):
+            members = [b for b in blocks if b["id"] in self.originals]
+            return len(words & set().union(*(_words(_block_text(b)) for b in members))) / len(words) if members else 0
+
+        # PDF 段落開頭與結尾的幾個字：頭尾區塊若正好是段落的開頭／結尾，就算單字都被別的區塊涵蓋也不能去掉
+        # （規格書的條列：「0.1Hz ~ 25 MHz Resolution」幾乎全是數字）
+        order = word_list(text)
+        head, tail = order[:EDGE_ANCHOR], order[-EDGE_ANCHOR:]
+
+        def anchored(part, at_start):
+            if at_start:
+                return word_list(_block_text(part[0]))[:EDGE_ANCHOR] == head
+            return word_list(_block_text(part[-1]))[-EDGE_ANCHOR:] == tail
+
+        best, best_coverage = [], 0
+        for run in runs:
+            # 頭尾的區塊拿掉後涵蓋率幾乎不變，就是相鄰段落的一句（只因常用字重疊而被併進來），去掉
+            while True:
+                while run and run[-1]["id"] not in self.originals:  # 頭尾的公式不屬於這段
+                    run.pop()
+                while run and run[0]["id"] not in self.originals:
+                    run.pop(0)
+                full = coverage(run)
+                trimmed = next((part for part, at_start in ((run[1:], True), (run[:-1], False))
+                                if len(part) > 1 and not anchored(run, at_start)
+                                and coverage(part) >= full - RUN_TRIM), None)
+                if trimmed is None:
+                    break
+                run = trimmed
+            if sum(b["id"] in self.originals for b in run) < 2:
+                continue
+            full = coverage(run)
+            if full >= MATCH_PARAGRAPH and full > best_coverage:
+                best, best_coverage = run, full
+        if translated and any("units" not in b for b in best if b["id"] in self.originals):
+            return []
         return best
 
     def fine_translation(self, page: int, text: str):
-        """有細翻就回傳；模型原樣交回英文時當作沒有，改顯示粗翻，並重新細翻一次。"""
+        """有細翻就回傳（跨好幾個區塊時依序接起來，公式保留原文）；
+        模型原樣交回英文時當作沒有，改顯示粗翻，並重新細翻一次。"""
         with self.lock:
-            best = self._match_block(page, text)
-            if not best:
-                return None
-            zh = "\n\n".join(" ".join(s["zh"] for s in unit) for unit in best["units"])
-            if not untranslated(zh):
-                return zh
-            bid = best["id"]
-            if bid not in self.retried:  # 每段只重試一次，避免模型一直交回英文時反覆佔用 GPU
-                self.retried.add(bid)
-                best.clear()
-                best.update(copy.deepcopy(self.originals[bid]))
-                self.pending.add(bid)
-                if self.mode == "ctrl" and (page, text) not in self.requests:
-                    self.requests.append((page, text))
-        return None
+            blocks = self._match_blocks(page, text)
+            parts, redo = [], False
+            for block in blocks:
+                if block["id"] not in self.originals:
+                    if block.get("type") == "math":
+                        parts.append(block.get("source", ""))
+                    continue
+                zh = "\n\n".join(" ".join(s["zh"] for s in unit) for unit in block["units"])
+                if untranslated(zh):
+                    redo = True
+                    self._retry(block, page, text)
+                parts.append(zh)
+            return "\n\n".join(parts) if parts and not redo else None
+
+    def _retry(self, block: dict, page: int, text: str) -> None:
+        bid = block["id"]
+        if bid in self.retried:  # 每段只重試一次，避免模型一直交回英文時反覆佔用 GPU
+            return
+        self.retried.add(bid)
+        block.clear()
+        block.update(copy.deepcopy(self.originals[bid]))
+        self.pending.add(bid)
+        if self.mode == "ctrl" and (page, text) not in self.requests:
+            self.requests.append((page, text))
 
     def _source_text(self, block: dict) -> str:
         """區塊的原文 Markdown，公式保留 LaTeX；已翻譯的區塊要從 originals 取。"""
@@ -141,11 +282,21 @@ class DocSession:
             return original["source"]
         return "\n".join(original["items"])
 
-    def extract(self, pages: list, text: str) -> dict:
-        """選取範圍對應的原文，包含夾在中間的獨立公式。waiting 表示這些頁還在解析。
+    def extract(self, pages: list, text: str, context: str = "", whole: bool = False) -> dict:
+        """選取範圍對應的原文（公式是 LaTeX），包含夾在中間的獨立公式。waiting 表示這些頁還在解析。
 
-        用選取的開頭與結尾各幾個單字定位，才不會把單字相近的標題或前段一起帶進來。
+        先用選取的開頭與結尾各幾個單字找出區塊（只選幾個字時改用滑鼠所在段落 context 找，避免對到別段的同一個字），
+        再把區塊裁到選取的範圍（_trim_to_selection）；whole=True 或裁不出來時交回整段，trimmed 表示有沒有裁。
         """
+        locate = context if context and len(word_list(text)) < 4 else text
+        result = self._extract_blocks(pages, locate)
+        if whole or not result["markdown"]:
+            return {**result, "trimmed": False}
+        trimmed = _trim_to_selection(result["markdown"], text)
+        return {**result, "markdown": trimmed or result["markdown"], "trimmed": bool(trimmed)}
+
+    def _extract_blocks(self, pages: list, text: str) -> dict:
+        """選取範圍涉及的整個區塊。用開頭與結尾各幾個單字定位，才不會把單字相近的標題或前段一起帶進來。"""
         words = word_list(text)
         head, tail = set(words[:EDGE_WORDS]), set(words[-EDGE_WORDS:])
         with self.lock:
@@ -234,9 +385,11 @@ class DocSession:
             start = self._missing_chunk(page)
             if start is not None:
                 return ("chunk", start)
-            block = self._match_block(page, text, translated=False) if text else None
-            if block and block["id"] in self.pending:
-                return ("block", block["id"])
+            # 一段可能對到好幾個區塊：逐一翻完才移除這個請求
+            blocks = self._match_blocks(page, text, translated=False) if text else []
+            bid = next((b["id"] for b in blocks if b["id"] in self.pending), None)
+            if bid:
+                return ("block", bid)
             self.requests.pop(0)
         return None
 
